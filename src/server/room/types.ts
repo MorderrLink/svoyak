@@ -12,7 +12,7 @@ export interface PlayerRecord {
   name: string;
   score: number;
   socketId: string | null;
-  token: string;
+  tokenHash: string;
 }
 
 export interface BuzzerWindowRecord {
@@ -30,7 +30,7 @@ export interface RoomRecord {
   createdAt: number;
   displaySocketIds: Set<string>;
   hostSocketId: string | null;
-  hostToken: string;
+  hostTokenHash: string;
   lastActivityAt: number;
   players: Map<string, PlayerRecord>;
   quizSnapshot: QuizConfig | null;

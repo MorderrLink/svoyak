@@ -614,6 +614,13 @@ export function HostScreen({ roomCode }: HostScreenProps) {
             {joinUrl}
           </a>
         )}
+        <NetworkDiagnostics
+          applicationUrls={session.applicationUrls}
+          connected={connected}
+          joinUrl={joinUrl}
+          roomState={roomState}
+          selectedBaseUrl={selectedBaseUrl}
+        />
         <div className="mt-4">
           <PlayerList players={roomState?.players ?? []} />
         </div>
@@ -621,6 +628,59 @@ export function HostScreen({ roomCode }: HostScreenProps) {
 
       <BottomProgress timer={game?.timer ?? roomState?.buzzer.timer ?? null} />
     </main>
+  );
+}
+
+function NetworkDiagnostics({
+  applicationUrls,
+  connected,
+  joinUrl,
+  roomState,
+  selectedBaseUrl,
+}: {
+  applicationUrls: string[];
+  connected: boolean;
+  joinUrl: string | null;
+  roomState: HostRoomState | null;
+  selectedBaseUrl: string;
+}) {
+  const selectedUrl = selectedBaseUrl === "" ? null : new URL(selectedBaseUrl);
+  const localAddresses = applicationUrls
+    .map((url) => new URL(url).hostname)
+    .filter((hostname) => hostname !== "localhost" && hostname !== "127.0.0.1");
+
+  return (
+    <section className="mt-5 rounded-xl border border-slate-300 bg-slate-50 p-3">
+      <h3 className="font-semibold">Диагностика сети</h3>
+      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-slate-500">Socket.IO</dt>
+        <dd className={connected ? "text-emerald-700" : "text-red-700"}>
+          {connected ? "подключён" : "нет соединения"}
+        </dd>
+        <dt className="text-slate-500">Клиентов</dt>
+        <dd>{roomState?.connectedClientCount ?? 0}</dd>
+        <dt className="text-slate-500">Display</dt>
+        <dd>{roomState?.connectedDisplayCount ?? 0}</dd>
+        <dt className="text-slate-500">Интерфейс</dt>
+        <dd className="break-all">{selectedUrl?.hostname ?? "не выбран"}</dd>
+        <dt className="text-slate-500">Порт</dt>
+        <dd>{selectedUrl?.port || "80"}</dd>
+        <dt className="text-slate-500">Локальные IPv4</dt>
+        <dd className="break-all">
+          {localAddresses.length === 0
+            ? "не найдены"
+            : localAddresses.join(", ")}
+        </dd>
+        <dt className="text-slate-500">Адрес игрока</dt>
+        <dd className="break-all">{joinUrl ?? "формируется"}</dd>
+      </dl>
+      <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-slate-600">
+        <li>Все устройства должны находиться в одной Wi-Fi или LAN-сети.</li>
+        <li>На телефонах отключите мобильный интернет и VPN.</li>
+        <li>Проверьте client isolation и изоляцию гостей на роутере.</li>
+        <li>Разрешите входящие подключения в firewall компьютера ведущего.</li>
+      </ul>
+    </section>
   );
 }
 

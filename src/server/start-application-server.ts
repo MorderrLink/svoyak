@@ -4,7 +4,13 @@ import { z } from "zod";
 import { createHttpServer } from "@/server/http/create-http-server";
 import { getApplicationUrls } from "@/server/network/local-addresses";
 import { RoomManager } from "@/server/room/room-manager";
+import {
+  RoomSnapshotPersistence,
+  RoomSnapshotStore,
+} from "@/server/session/room-snapshot-store";
+import { SessionEventJournal } from "@/server/session/session-event-journal";
 import { registerSocketHandlers } from "@/server/socket/register-socket-handlers";
+import { SocketSecurity } from "@/server/socket/socket-security";
 
 import type { Server as NodeHttpServer } from "node:http";
 import type { Server as SocketIOServer } from "socket.io";
@@ -51,9 +57,31 @@ export async function startApplicationServer(): Promise<void> {
 
   const requestHandler = nextApp.getRequestHandler();
   const { httpServer, io } = createHttpServer(requestHandler);
-  const roomManager = new RoomManager();
+  const sessionJournal = new SessionEventJournal();
+  const roomManager = new RoomManager({
+    journal: sessionJournal,
+  });
+  const snapshotStore = new RoomSnapshotStore();
+  const snapshot = await snapshotStore.load();
+  if (snapshot !== null) {
+    const restored = roomManager.restoreSnapshot(snapshot);
+    roomManager.reconcileExpiredTimers();
+    if (restored.length > 0) {
+      console.log(`Восстановлены активные комнаты: ${restored.join(", ")}`);
+    }
+  }
+  const snapshotPersistence = new RoomSnapshotPersistence(
+    roomManager,
+    snapshotStore,
+  );
+  snapshotPersistence.start();
+  if (snapshot !== null) {
+    snapshotPersistence.schedule();
+  }
+  const socketSecurity = new SocketSecurity(sessionJournal);
   const disposeSocketHandlers = registerSocketHandlers(io, roomManager, {
     applicationUrls: getApplicationUrls(port),
+    security: socketSecurity,
   });
 
   await listen(httpServer, port);
@@ -75,7 +103,9 @@ export async function startApplicationServer(): Promise<void> {
 
     try {
       disposeSocketHandlers();
+      await snapshotPersistence.stop();
       await closeSocketServer(io);
+      await sessionJournal.flush();
       await nextApp.close();
       console.log("Сервер остановлен.");
     } catch (error: unknown) {

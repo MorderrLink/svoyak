@@ -140,6 +140,7 @@ test("публичный экран синхронизируется без пр
   await hostPage.goto("/editor/new");
   await hostPage.getByLabel("Название викторины").fill(quizTitle);
   await hostPage.getByLabel("Задержка перед вопросом").fill("2");
+  await hostPage.getByLabel("Время на нажатие").fill("30");
   await hostPage.getByLabel("Показ ответа").fill("2");
   await hostPage.getByLabel("Название темы 1").fill("Двойной экран");
   await hostPage.getByLabel("Текст вопроса 1").fill(questionText);
@@ -211,6 +212,19 @@ test("публичный экран синхронизируется без пр
     await expect(displayPage.getByText(questionText)).toBeVisible();
     await expect(displayPage.getByText(answer)).toHaveCount(0);
     await expect(displayPage.getByText(hostComment)).toHaveCount(0);
+
+    await displayPage.reload();
+    await expect(
+      displayPage.getByTestId("display-phase-buzzing"),
+    ).toBeVisible();
+    await expect(displayPage.getByText(answer)).toHaveCount(0);
+    await playerPage.reload();
+    await expect(
+      playerPage.getByRole("button", { name: "НАЖАТЬ" }),
+    ).toBeEnabled();
+    await hostPage.reload();
+    await expect(hostPage.getByText(questionText)).toBeVisible();
+    await expect(hostPage.getByText(hostComment)).toBeVisible();
 
     await playerPage.getByRole("button", { name: "НАЖАТЬ" }).click();
     await expect(

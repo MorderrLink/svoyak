@@ -12,9 +12,11 @@ export type SocketErrorCode =
   | "NAME_TAKEN"
   | "PLAYER_UNAUTHORIZED"
   | "QUIZ_NOT_FOUND"
+  | "RATE_LIMITED"
   | "ROOM_NOT_FOUND"
   | "SESSION_INVALID_PHASE"
-  | "SESSION_NOT_STARTED";
+  | "SESSION_NOT_STARTED"
+  | "TOO_MANY_ERRORS";
 
 export interface SocketError {
   code: SocketErrorCode;
@@ -58,6 +60,8 @@ export interface HostBuzzerState {
 
 export interface HostRoomState {
   buzzer: HostBuzzerState;
+  connectedClientCount: number;
+  connectedDisplayCount: number;
   game: HostGameState | null;
   players: PublicPlayer[];
   quizTitle: string | null;

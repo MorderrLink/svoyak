@@ -2,6 +2,7 @@ import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { getQuizRepository } from "@/server/quiz/quiz-repository-instance";
 import { RoomError } from "@/server/room/room-error";
 import type { RoomManager } from "@/server/room/room-manager";
+import { SocketSecurity } from "@/server/socket/socket-security";
 import type {
   ClientToServerEvents,
   InterServerEvents,
@@ -44,6 +45,7 @@ type ApplicationSocket = Socket<
 export interface SocketHandlerOptions {
   applicationUrls: string[];
   inactiveRoomLifetimeMs?: number;
+  security?: SocketSecurity;
 }
 
 interface ParsedPayload<T> {
@@ -58,6 +60,10 @@ interface InvalidPayload {
 
 const defaultInactiveRoomLifetimeMs = 30 * 60 * 1_000;
 const cleanupIntervalMs = 60_000;
+const socketSecurityInstances = new WeakMap<
+  ApplicationSocket,
+  SocketSecurity
+>();
 
 function success<T>(data: T): SocketResult<T> {
   return {
@@ -71,6 +77,12 @@ function failure(error: SocketError): SocketResult<never> {
     error,
     ok: false,
   };
+}
+
+function isResultCallback(
+  value: unknown,
+): value is (result: SocketResult<never>) => void {
+  return typeof value === "function";
 }
 
 function toSocketError(error: unknown): SocketError {
@@ -127,6 +139,19 @@ function respondWithError<T>(
   } else {
     socket.emit("error", error);
   }
+
+  const security = socketSecurityInstances.get(socket);
+  if (
+    security?.recordError(socket.id, error.code, socket.data.roomCode) === true
+  ) {
+    socket.emit("error", {
+      code: "TOO_MANY_ERRORS",
+      message: "Соединение закрыто из-за большого количества ошибок",
+    });
+    queueMicrotask(() => {
+      socket.disconnect(true);
+    });
+  }
 }
 
 function respondWithSuccess<T>(
@@ -162,11 +187,11 @@ function emitRoomState(
     );
   }
 
-  for (const displaySocketId of room.displaySocketIds) {
-    io.to(displaySocketId).emit(
-      "display:state",
-      roomManager.getDisplayState(roomCode),
-    );
+  if (room.displaySocketIds.size > 0) {
+    const displayState = roomManager.getDisplayState(roomCode);
+    for (const displaySocketId of room.displaySocketIds) {
+      io.to(displaySocketId).emit("display:state", displayState);
+    }
   }
 
   for (const player of room.players.values()) {
@@ -195,6 +220,7 @@ export function registerSocketHandlers(
   options: SocketHandlerOptions,
 ): () => void {
   const expirationTimers = new Map<string, NodeJS.Timeout>();
+  const security = options.security ?? new SocketSecurity();
   const inactiveRoomLifetimeMs =
     options.inactiveRoomLifetimeMs ?? defaultInactiveRoomLifetimeMs;
   const quizRepository = getQuizRepository();
@@ -261,6 +287,28 @@ export function registerSocketHandlers(
   };
 
   io.on("connection", (socket) => {
+    socketSecurityInstances.set(socket, security);
+    socket.use((event, next) => {
+      const eventName =
+        typeof event[0] === "string" ? event[0] : "unknown_socket_event";
+      const decision = security.checkSocketEvent(socket.id, eventName);
+      if (decision.allowed) {
+        next();
+        return;
+      }
+
+      const error: SocketError = {
+        code: "RATE_LIMITED",
+        message: decision.message ?? "Слишком много событий. Попробуйте позже",
+      };
+      const possibleCallback: unknown = event[event.length - 1];
+      respondWithError(
+        socket,
+        isResultCallback(possibleCallback) ? possibleCallback : undefined,
+        error,
+      );
+    });
+
     socket.on("room:check", (payload, callback) => {
       const parsed = parsePayload(checkRoomPayloadSchema, payload);
 
@@ -490,9 +538,28 @@ export function registerSocketHandlers(
         return;
       }
 
+      const securityDecision = security.checkPlayerPress(
+        parsed.data.playerToken,
+        parsed.data.buzzWindowId,
+        parsed.data.roomCode,
+      );
+      if (!securityDecision.allowed) {
+        respondWithError(socket, callback, {
+          code: "RATE_LIMITED",
+          message:
+            securityDecision.message ??
+            "Слишком много нажатий. Попробуйте позже",
+        });
+        return;
+      }
+
       try {
         roomManager.pressBuzzer(
           parsed.data.roomCode,
+          parsed.data.playerToken,
+          parsed.data.buzzWindowId,
+        );
+        security.markAcceptedPress(
           parsed.data.playerToken,
           parsed.data.buzzWindowId,
         );
@@ -500,6 +567,14 @@ export function registerSocketHandlers(
         respondWithSuccess(socket, callback, { accepted: true });
         emitRoomState(io, roomManager, parsed.data.roomCode);
       } catch (error: unknown) {
+        if (
+          error instanceof RoomError &&
+          (error.code === "BUZZER_CLOSED" ||
+            error.code === "BUZZ_WINDOW_EXPIRED" ||
+            error.code === "BUZZ_WINDOW_MISMATCH")
+        ) {
+          security.markClosedPress(parsed.data.playerToken);
+        }
         respondWithError(socket, callback, toSocketError(error));
         emitRoomState(io, roomManager, parsed.data.roomCode);
       }
@@ -673,6 +748,9 @@ export function registerSocketHandlers(
     socket.on("disconnect", () => {
       const { playerId, role, roomCode } = socket.data;
 
+      socketSecurityInstances.delete(socket);
+      security.removeSocket(socket.id);
+
       if (roomCode === undefined || role === undefined) {
         return;
       }
@@ -688,6 +766,26 @@ export function registerSocketHandlers(
       emitRoomState(io, roomManager, roomCode);
     });
   });
+
+  for (const roomCode of roomManager.getRoomCodes()) {
+    const room = roomManager.getRoom(roomCode);
+    const phase = room?.session?.getPhase();
+    const timer = room?.session?.getTimer();
+
+    if (room?.buzzer?.status === "open") {
+      scheduleExpiration(
+        roomCode,
+        room.buzzer.id,
+        Math.max(0, room.buzzer.timer.endsAt - Date.now()),
+      );
+    } else if (
+      timer !== null &&
+      timer !== undefined &&
+      (phase === "answer-reveal" || phase === "question-intro")
+    ) {
+      scheduleGameTransition(roomCode, phase, timer.endsAt);
+    }
+  }
 
   const cleanupTimer = setInterval(() => {
     for (const roomCode of roomManager.deleteInactiveRooms(

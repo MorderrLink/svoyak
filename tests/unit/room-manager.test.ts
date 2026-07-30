@@ -173,4 +173,32 @@ describe("RoomManager", () => {
     now = 20_000;
     expect(manager.deleteInactiveRooms(1_000)).toEqual([room.roomCode]);
   });
+
+  it("стабильно обслуживает комнату с 20 игроками", () => {
+    const manager = createManager();
+    const room = manager.createRoom();
+    const players = Array.from({ length: 20 }, (_, index) =>
+      manager.addPlayer(
+        room.roomCode,
+        `Игрок ${index + 1}`,
+        `socket-${index + 1}`,
+      ),
+    );
+    const window = manager.openBuzzer(room.roomCode, room.hostToken, 5_000);
+
+    manager.pressBuzzer(
+      room.roomCode,
+      players[19]!.playerToken,
+      window.buzzWindowId,
+    );
+
+    expect(manager.getHostState(room.roomCode).players).toHaveLength(20);
+    expect(manager.getPublicRoomState(room.roomCode)).toMatchObject({
+      buzzerStatus: "winner",
+      connectedPlayerCount: 20,
+    });
+    expect(manager.getHostState(room.roomCode).buzzer.winner?.name).toBe(
+      "Игрок 20",
+    );
+  });
 });
