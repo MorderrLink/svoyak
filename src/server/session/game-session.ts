@@ -311,8 +311,9 @@ export class GameSession {
       currentPlayerId: this.activeQuestion.currentPlayerId,
       hostComment: question.hostComment ?? null,
       id: question.id,
+      image: question.content.image ?? null,
       price: question.price,
-      text: question.content.text,
+      text: question.content.text?.trim() || null,
       themeTitle: theme.title,
     };
   }

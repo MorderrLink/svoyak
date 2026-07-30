@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -9,7 +10,13 @@ import { ErrorMessage } from "@/components/error-message";
 import { Input } from "@/components/input";
 import { LoadingState } from "@/components/loading-state";
 import { ScrollArea } from "@/components/scroll-area";
-import { createQuiz, getQuiz, updateQuiz } from "@/shared/api/quizzes";
+import {
+  createQuiz,
+  getQuiz,
+  getQuizAssetUrl,
+  updateQuiz,
+  uploadQuizImage,
+} from "@/shared/api/quizzes";
 import { createNewQuiz } from "@/shared/quiz/factory";
 import { quizConfigSchema } from "@/shared/schemas/quiz";
 import { useQuizEditorStore } from "@/stores/quiz-editor-store";
@@ -25,6 +32,9 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
   const setEditorError = useQuizEditorStore((state) => state.setError);
   const [confirmExit, setConfirmExit] = useState(false);
   const [loading, setLoading] = useState(quizId !== undefined);
+  const [uploadingQuestionId, setUploadingQuestionId] = useState<string | null>(
+    null,
+  );
 
   useEffect(() => {
     let active = true;
@@ -116,6 +126,45 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
       setConfirmExit(true);
     } else {
       router.push("/library");
+    }
+  };
+
+  const uploadImage = async (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    file: File,
+  ) => {
+    if (editor.draft === null) {
+      return;
+    }
+    if (
+      editor.savedQuiz !== null &&
+      editor.savedQuiz.slug !== editor.draft.slug
+    ) {
+      editor.setError(
+        "Сначала сохраните новый slug, затем загрузите изображение",
+      );
+      return;
+    }
+
+    setUploadingQuestionId(questionId);
+    editor.setError(null);
+    try {
+      const image = await uploadQuizImage(
+        quizId ?? editor.draft.id,
+        editor.draft.slug,
+        file,
+      );
+      editor.setQuestionImage(roundId, themeId, questionId, image);
+    } catch (uploadError: unknown) {
+      editor.setError(
+        uploadError instanceof Error
+          ? uploadError.message
+          : "Не удалось загрузить изображение",
+      );
+    } finally {
+      setUploadingQuestionId(null);
     }
   };
 
@@ -383,7 +432,7 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
                                   },
                                 );
                               }}
-                              value={question.content.text}
+                              value={question.content.text ?? ""}
                             />
                           </label>
                           <label>
@@ -425,6 +474,86 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
                               value={question.hostComment ?? ""}
                             />
                           </label>
+                          <section className="space-y-3 lg:col-span-2 lg:col-start-2">
+                            <label className="block">
+                              <span className="mb-1 block text-sm text-slate-300">
+                                Изображение вопроса
+                              </span>
+                              <Input
+                                accept=".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"
+                                aria-label={`Изображение вопроса ${questionIndex + 1}`}
+                                disabled={uploadingQuestionId === question.id}
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0];
+                                  if (file !== undefined) {
+                                    void uploadImage(
+                                      round.id,
+                                      theme.id,
+                                      question.id,
+                                      file,
+                                    );
+                                  }
+                                  event.target.value = "";
+                                }}
+                                type="file"
+                              />
+                            </label>
+                            {uploadingQuestionId === question.id ? (
+                              <p className="text-sm text-blue-300">
+                                Проверяем и нормализуем изображение…
+                              </p>
+                            ) : null}
+                            {question.content.image === undefined ? null : (
+                              <div className="grid gap-3 rounded-lg bg-slate-950 p-3 sm:grid-cols-[12rem_1fr]">
+                                <Image
+                                  alt={
+                                    question.content.image.alt ??
+                                    "Предпросмотр вопроса"
+                                  }
+                                  className="h-36 w-full rounded-lg object-contain"
+                                  height={144}
+                                  src={getQuizAssetUrl(
+                                    question.content.image.path,
+                                  )}
+                                  unoptimized
+                                  width={192}
+                                />
+                                <div>
+                                  <label>
+                                    <span className="mb-1 block text-sm text-slate-300">
+                                      Alt-текст
+                                    </span>
+                                    <Input
+                                      aria-label={`Alt-текст вопроса ${questionIndex + 1}`}
+                                      onChange={(event) => {
+                                        editor.setQuestionImageAlt(
+                                          round.id,
+                                          theme.id,
+                                          question.id,
+                                          event.target.value,
+                                        );
+                                      }}
+                                      value={question.content.image.alt ?? ""}
+                                    />
+                                  </label>
+                                  <Button
+                                    className="mt-3"
+                                    onClick={() => {
+                                      editor.setQuestionImage(
+                                        round.id,
+                                        theme.id,
+                                        question.id,
+                                        undefined,
+                                      );
+                                    }}
+                                    variant="danger"
+                                  >
+                                    Удалить изображение
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </section>
                           <Button
                             className="lg:col-start-1 lg:row-start-2"
                             onClick={() => {

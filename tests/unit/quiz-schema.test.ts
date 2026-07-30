@@ -94,6 +94,28 @@ describe("quizConfigSchema", () => {
     expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
   });
 
+  it("поддерживает вопрос только с изображением", () => {
+    const quiz = createValidQuiz();
+    const question = getFirstQuestion(quiz);
+    question.content = {
+      image: {
+        alt: "Кадр из фильма",
+        path: "assets/kino-2026/images/frame.webp",
+      },
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
+  });
+
+  it("отклоняет путь изображения другого slug", () => {
+    const quiz = createValidQuiz();
+    getFirstQuestion(quiz).content.image = {
+      path: "assets/other-quiz/images/frame.webp",
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+  });
+
   it("запрещает одинаковую стоимость вопросов внутри темы", () => {
     const quiz = createValidQuiz();
     const questions = quiz.rounds[0]?.themes[0]?.questions;

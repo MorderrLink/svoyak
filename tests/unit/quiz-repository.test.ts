@@ -2,6 +2,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { QuizRepository } from "@/server/quiz/quiz-repository";
@@ -128,5 +129,72 @@ describe("QuizRepository", () => {
       }),
     ).rejects.toBeInstanceOf(QuizRepositoryError);
     await expect(readdir(directory)).resolves.toEqual([]);
+  });
+
+  it("переносит изображения при смене slug и удаляет вместе с викториной", async () => {
+    let quiz = createQuiz();
+    await repository.create(quiz);
+    const png = await sharp({
+      create: {
+        background: "#000000",
+        channels: 4,
+        height: 4,
+        width: 4,
+      },
+    })
+      .png()
+      .toBuffer();
+    const image = await repository.getAssets().uploadImage(quiz.slug, png);
+    quiz.rounds[0]!.themes[0]!.questions[0]!.content.image = image;
+    await repository.update(quiz.id, quiz);
+
+    quiz = {
+      ...quiz,
+      rounds: quiz.rounds.map((round) => ({
+        ...round,
+        themes: round.themes.map((theme) => ({
+          ...theme,
+          questions: theme.questions.map((question) => ({
+            ...question,
+            content: {
+              ...question.content,
+              image:
+                question.content.image === undefined
+                  ? undefined
+                  : {
+                      ...question.content.image,
+                      path: question.content.image.path.replace(
+                        "assets/test-quiz/",
+                        "assets/renamed-quiz/",
+                      ),
+                    },
+            },
+          })),
+        })),
+      })),
+      slug: "renamed-quiz",
+      updatedAt: "2026-07-29T19:00:00.000Z",
+    };
+    const updated = await repository.update(quiz.id, quiz);
+    const updatedPath =
+      updated.rounds[0]!.themes[0]!.questions[0]!.content.image!.path;
+
+    await expect(
+      repository.getAssets().readAsset(updatedPath),
+    ).resolves.toBeInstanceOf(Buffer);
+    await repository.delete(quiz.id);
+    await expect(
+      repository.getAssets().readAsset(updatedPath),
+    ).rejects.toMatchObject({
+      code: "QUIZ_NOT_FOUND",
+    });
+  });
+
+  it("не разрешает чтение assets вне games", async () => {
+    await expect(
+      repository.getAssets().readAsset("../secret.webp"),
+    ).rejects.toMatchObject({
+      code: "QUIZ_VALIDATION_ERROR",
+    });
   });
 });

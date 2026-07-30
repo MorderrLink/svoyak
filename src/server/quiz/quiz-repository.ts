@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, extname, resolve } from "node:path";
 
+import { AssetStorage } from "@/server/media/asset-storage";
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { quizConfigSchema } from "@/shared/schemas/quiz";
 import type { QuizConfig, QuizSummary } from "@/shared/types/quiz";
@@ -21,10 +22,20 @@ interface StoredQuiz {
 }
 
 export class QuizRepository {
+  private readonly assetStorage: AssetStorage;
   private readonly gamesDirectory: string;
 
   constructor(gamesDirectory = resolve(process.cwd(), "games")) {
     this.gamesDirectory = resolve(gamesDirectory);
+    this.assetStorage = new AssetStorage(this.gamesDirectory);
+  }
+
+  getAssets(): AssetStorage {
+    return this.assetStorage;
+  }
+
+  getDirectory(): string {
+    return this.gamesDirectory;
   }
 
   async list(): Promise<QuizSummary[]> {
@@ -78,6 +89,7 @@ export class QuizRepository {
     }
 
     await this.atomicWrite(this.getConfigPath(quiz.slug), quiz);
+    await this.assetStorage.cleanupUnused(quiz);
     return structuredClone(quiz);
   }
 
@@ -104,22 +116,42 @@ export class QuizRepository {
       );
     }
 
-    await this.atomicWrite(destinationPath, quiz);
+    const slugChanged = destinationPath !== stored.path;
+    let assetsMoved = false;
 
-    if (destinationPath !== stored.path) {
-      try {
-        await unlink(stored.path);
-      } catch (error: unknown) {
-        await rm(destinationPath, {
-          force: true,
-        });
-        throw new QuizRepositoryError(
-          "QUIZ_STORAGE_ERROR",
-          `Не удалось переименовать конфиг: ${String(error)}`,
-        );
-      }
+    if (slugChanged) {
+      assetsMoved = await this.assetStorage.moveQuizAssets(
+        stored.quiz.slug,
+        quiz.slug,
+      );
     }
 
+    try {
+      await this.atomicWrite(destinationPath, quiz);
+
+      if (slugChanged) {
+        await unlink(stored.path);
+      }
+    } catch (error: unknown) {
+      try {
+        if (slugChanged) {
+          await rm(destinationPath, {
+            force: true,
+          });
+        }
+        if (assetsMoved) {
+          await this.assetStorage.moveQuizAssets(quiz.slug, stored.quiz.slug);
+        }
+      } catch (rollbackError: unknown) {
+        console.error(
+          "Не удалось откатить обновление викторины:",
+          rollbackError,
+        );
+      }
+      throw error;
+    }
+
+    await this.assetStorage.cleanupUnused(quiz);
     return structuredClone(quiz);
   }
 
@@ -131,6 +163,14 @@ export class QuizRepository {
     }
 
     await unlink(stored.path);
+    await this.assetStorage.deleteQuizAssets(stored.quiz.slug);
+  }
+
+  async findBySlug(slug: string): Promise<QuizConfig | undefined> {
+    const stored = (await this.readAll()).find(
+      ({ quiz }) => quiz.slug === slug,
+    );
+    return stored === undefined ? undefined : structuredClone(stored.quiz);
   }
 
   async slugExists(slug: string): Promise<boolean> {

@@ -1,3 +1,5 @@
+import type { QuizImage } from "@/shared/types/quiz";
+
 export type SocketErrorCode =
   | "BUZZER_CLOSED"
   | "BUZZ_ALREADY_PRESSED"
@@ -196,8 +198,9 @@ export interface HostActiveQuestion {
   currentPlayerId: string | null;
   hostComment: string | null;
   id: string;
+  image: QuizImage | null;
   price: number;
-  text: string;
+  text: string | null;
   themeTitle: string;
 }
 

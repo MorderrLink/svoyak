@@ -11,6 +11,7 @@ import { ErrorMessage } from "@/components/error-message";
 import { Input } from "@/components/input";
 import { ScrollArea } from "@/components/scroll-area";
 import { listQuizzes } from "@/shared/api/quizzes";
+import { getQuizAssetUrl } from "@/shared/api/quizzes";
 import { hostSessionStorageKey } from "@/shared/constants/storage";
 import type {
   AnswerJudgement,
@@ -453,9 +454,22 @@ export function HostScreen() {
               <p className="text-sm text-blue-300">
                 {activeQuestion?.themeTitle} · {activeQuestion?.price}
               </p>
-              <h2 className="mt-2 text-3xl font-semibold">
-                {activeQuestion?.text}
-              </h2>
+              {activeQuestion?.text === null ? null : (
+                <h2 className="mt-2 text-3xl font-semibold">
+                  {activeQuestion?.text}
+                </h2>
+              )}
+              {activeQuestion?.image === null ||
+              activeQuestion?.image === undefined ? null : (
+                <Image
+                  alt={activeQuestion.image.alt ?? "Изображение вопроса"}
+                  className="mt-5 max-h-[40vh] w-full rounded-xl object-contain"
+                  height={720}
+                  src={getQuizAssetUrl(activeQuestion.image.path)}
+                  unoptimized
+                  width={1280}
+                />
+              )}
               <div className="mt-5 rounded-xl bg-slate-950/70 p-4">
                 <p className="text-xs text-slate-400">Правильный ответ</p>
                 <p className="mt-1 text-xl">{activeQuestion?.answer}</p>

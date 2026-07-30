@@ -7,6 +7,23 @@ const orderSchema = z.number().int().nonnegative();
 const timestampSchema = z.string().datetime({
   offset: true,
 });
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const assetChecksumSchema = z
+  .object({
+    path: z.string().min(1),
+    sha256: sha256Schema,
+    size: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const packageIntegritySchema = z
+  .object({
+    algorithm: z.literal("sha256"),
+    assets: z.array(assetChecksumSchema),
+    contentDigest: sha256Schema,
+  })
+  .strict();
 
 export const quizSettingsSchema = z
   .object({
@@ -31,15 +48,36 @@ export const quizSettingsSchema = z
   })
   .strict();
 
-export const textQuestionContentSchema = z
+export const quizImageSchema = z
   .object({
-    text: z
+    alt: z.string().trim().max(quizLimits.imageAltLength).optional(),
+    path: z
       .string()
       .trim()
-      .min(1, "Введите текст вопроса")
-      .max(quizLimits.questionTextLength),
+      .regex(
+        /^assets\/[a-z0-9]+(?:-[a-z0-9]+)*\/images\/[a-zA-Z0-9._-]+$/,
+        "Некорректный путь изображения",
+      ),
   })
   .strict();
+
+export const questionContentSchema = z
+  .object({
+    image: quizImageSchema.optional(),
+    text: z.string().trim().max(quizLimits.questionTextLength).optional(),
+  })
+  .strict()
+  .superRefine((content, context) => {
+    if ((content.text?.length ?? 0) === 0 && content.image === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Добавьте текст или изображение вопроса",
+        path: ["text"],
+      });
+    }
+  });
+
+export const textQuestionContentSchema = questionContentSchema;
 
 export const quizQuestionSchema = z
   .object({
@@ -48,7 +86,7 @@ export const quizQuestionSchema = z
       .trim()
       .min(1, "Введите правильный ответ")
       .max(quizLimits.answerLength),
-    content: textQuestionContentSchema,
+    content: questionContentSchema,
     hostComment: z
       .string()
       .trim()
@@ -119,6 +157,7 @@ export const quizConfigSchema = z
   .object({
     createdAt: timestampSchema,
     id: entityIdSchema,
+    packageIntegrity: packageIntegritySchema.optional(),
     rounds: z.array(quizRoundSchema).min(1, "Добавьте хотя бы один раунд"),
     schemaVersion: z.literal(QUIZ_SCHEMA_VERSION),
     settings: quizSettingsSchema,
@@ -199,6 +238,34 @@ export const quizConfigSchema = z
         path: ["updatedAt"],
       });
     }
+
+    quiz.rounds.forEach((round, roundIndex) => {
+      round.themes.forEach((theme, themeIndex) => {
+        theme.questions.forEach((question, questionIndex) => {
+          const imagePath = question.content.image?.path;
+          if (
+            imagePath !== undefined &&
+            !imagePath.startsWith(`assets/${quiz.slug}/images/`)
+          ) {
+            context.addIssue({
+              code: "custom",
+              message: "Путь изображения не соответствует slug викторины",
+              path: [
+                "rounds",
+                roundIndex,
+                "themes",
+                themeIndex,
+                "questions",
+                questionIndex,
+                "content",
+                "image",
+                "path",
+              ],
+            });
+          }
+        });
+      });
+    });
   });
 
 export const quizSummarySchema = z

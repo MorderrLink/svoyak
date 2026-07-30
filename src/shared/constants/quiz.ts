@@ -15,6 +15,9 @@ export const quizLimits = {
     min: 1,
   },
   hostCommentLength: 5_000,
+  imageAltLength: 500,
+  imageFileSize: 10 * 1_024 * 1_024,
+  imagePixels: 40_000_000,
   questionIntroSeconds: {
     max: 30,
     min: 0,
