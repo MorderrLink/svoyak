@@ -159,4 +159,18 @@ describe("RoomManager", () => {
       manager.getPlayerState(room.roomCode, player.playerId).connected,
     ).toBe(true);
   });
+
+  it("учитывает подключённый публичный экран при очистке комнат", () => {
+    let now = 1_000;
+    const manager = createManager(() => now);
+    const room = manager.createRoom();
+
+    manager.attachDisplay(room.roomCode, "display-1");
+    now = 10_000;
+    expect(manager.deleteInactiveRooms(1_000)).toEqual([]);
+
+    manager.disconnectDisplay(room.roomCode, "display-1");
+    now = 20_000;
+    expect(manager.deleteInactiveRooms(1_000)).toEqual([room.roomCode]);
+  });
 });

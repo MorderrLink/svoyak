@@ -336,6 +336,17 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
                   </Button>
                 </div>
               </header>
+              {round.themes.length > 8 ||
+              round.themes.some((theme) => theme.title.length > 32) ? (
+                <div
+                  className="mt-3 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm text-amber-200"
+                  role="status"
+                >
+                  Публичная сетка может плохо поместиться на телевизоре.
+                  Рекомендуется не больше 8 тем и до 32 символов в названии
+                  темы.
+                </div>
+              ) : null}
 
               <div className="mt-4 space-y-4">
                 {round.themes.map((theme, themeIndex) => (
