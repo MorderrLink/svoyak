@@ -1,5 +1,9 @@
 import type {
+  assetChecksumSchema,
+  packageIntegritySchema,
+  questionContentSchema,
   quizConfigSchema,
+  quizImageSchema,
   quizQuestionSchema,
   quizRoundSchema,
   quizSettingsSchema,
@@ -10,6 +14,10 @@ import type {
 import type { z } from "zod";
 
 export type QuizConfig = z.infer<typeof quizConfigSchema>;
+export type AssetChecksum = z.infer<typeof assetChecksumSchema>;
+export type PackageIntegrity = z.infer<typeof packageIntegritySchema>;
+export type QuestionContent = z.infer<typeof questionContentSchema>;
+export type QuizImage = z.infer<typeof quizImageSchema>;
 export type QuizQuestion = z.infer<typeof quizQuestionSchema>;
 export type QuizRound = z.infer<typeof quizRoundSchema>;
 export type QuizSettings = z.infer<typeof quizSettingsSchema>;

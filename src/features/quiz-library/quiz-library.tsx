@@ -5,10 +5,18 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/button";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { Dialog } from "@/components/dialog";
 import { ErrorMessage } from "@/components/error-message";
 import { LoadingState } from "@/components/loading-state";
 import { ScrollArea } from "@/components/scroll-area";
-import { deleteQuiz, duplicateQuiz, listQuizzes } from "@/shared/api/quizzes";
+import {
+  deleteQuiz,
+  downloadQuizPackage,
+  duplicateQuiz,
+  importQuizPackage,
+  listQuizzes,
+  QuizApiError,
+} from "@/shared/api/quizzes";
 import type { QuizSummary } from "@/shared/types/quiz";
 
 export function QuizLibrary() {
@@ -16,6 +24,10 @@ export function QuizLibrary() {
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [importConflictFile, setImportConflictFile] = useState<File | null>(
+    null,
+  );
+  const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [quizzes, setQuizzes] = useState<QuizSummary[]>([]);
 
@@ -97,6 +109,76 @@ export function QuizLibrary() {
     }
   };
 
+  const handleExport = async (quizId: string) => {
+    try {
+      const exported = await downloadQuizPackage(quizId);
+      if (window.showSaveFilePicker !== undefined) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: exported.filename,
+          types: [
+            {
+              accept: {
+                "application/zip": [".zip"],
+              },
+              description: "Архив викторины",
+            },
+          ],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(exported.source);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(exported.source);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = exported.filename;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      }
+    } catch (exportError: unknown) {
+      if (
+        exportError instanceof DOMException &&
+        exportError.name === "AbortError"
+      ) {
+        return;
+      }
+      setError(
+        exportError instanceof Error
+          ? exportError.message
+          : "Не удалось экспортировать викторину",
+      );
+    }
+  };
+
+  const handleImport = async (
+    file: File,
+    strategy: "copy" | "error" | "replace" = "error",
+  ) => {
+    setImporting(true);
+    try {
+      await importQuizPackage(file, strategy);
+      setImportConflictFile(null);
+      setError(null);
+      await load();
+    } catch (importError: unknown) {
+      if (
+        importError instanceof QuizApiError &&
+        importError.code === "QUIZ_SLUG_CONFLICT" &&
+        strategy === "error"
+      ) {
+        setImportConflictFile(file);
+      } else {
+        setError(
+          importError instanceof Error
+            ? importError.message
+            : "Не удалось импортировать викторину",
+        );
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <main className="flex h-full flex-col overflow-hidden bg-slate-950 p-4 text-white">
       <header className="flex flex-wrap items-center justify-between gap-3">
@@ -104,7 +186,7 @@ export function QuizLibrary() {
           <p className="text-sm text-blue-300">Свояк</p>
           <h1 className="text-3xl font-semibold">Библиотека викторин</h1>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Link
             className="inline-flex min-h-11 items-center rounded-lg bg-slate-700 px-4 py-2 font-medium hover:bg-slate-600"
             href="/"
@@ -117,6 +199,23 @@ export function QuizLibrary() {
           >
             Создать викторину
           </Link>
+          <label className="inline-flex min-h-11 cursor-pointer items-center rounded-lg bg-emerald-700 px-4 py-2 font-medium hover:bg-emerald-600">
+            {importing ? "Импортируем…" : "Импортировать ZIP"}
+            <input
+              accept=".zip,application/zip"
+              aria-label="Импортировать ZIP"
+              className="sr-only"
+              disabled={importing}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file !== undefined) {
+                  void handleImport(file);
+                }
+                event.target.value = "";
+              }}
+              type="file"
+            />
+          </label>
         </div>
       </header>
 
@@ -187,6 +286,15 @@ export function QuizLibrary() {
                     <Button
                       className="min-h-11 px-3 text-sm"
                       onClick={() => {
+                        void handleExport(quiz.id);
+                      }}
+                      variant="secondary"
+                    >
+                      Экспорт ZIP
+                    </Button>
+                    <Button
+                      className="min-h-11 px-3 text-sm"
+                      onClick={() => {
                         setDeleteCandidate(quiz);
                       }}
                       variant="danger"
@@ -214,6 +322,52 @@ export function QuizLibrary() {
         open={deleteCandidate !== null}
         title="Удаление викторины"
       />
+      <Dialog
+        actions={
+          <>
+            <Button
+              disabled={importing}
+              onClick={() => {
+                setImportConflictFile(null);
+              }}
+              variant="secondary"
+            >
+              Отмена
+            </Button>
+            <Button
+              disabled={importing}
+              onClick={() => {
+                if (importConflictFile !== null) {
+                  void handleImport(importConflictFile, "copy");
+                }
+              }}
+            >
+              Создать копию
+            </Button>
+            <Button
+              disabled={importing}
+              onClick={() => {
+                if (importConflictFile !== null) {
+                  void handleImport(importConflictFile, "replace");
+                }
+              }}
+              variant="danger"
+            >
+              Заменить
+            </Button>
+          </>
+        }
+        onClose={() => {
+          setImportConflictFile(null);
+        }}
+        open={importConflictFile !== null}
+        title="Конфликт slug"
+      >
+        <p className="text-slate-700">
+          Викторина с таким slug уже существует. Замените её или импортируйте
+          архив как независимую копию.
+        </p>
+      </Dialog>
     </main>
   );
 }

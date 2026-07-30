@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ZodError } from "zod";
 
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import type { ApiErrorResponse } from "@/shared/types/api";
@@ -30,6 +31,20 @@ export function apiErrorResponse(
       },
       {
         status: getStatus(error),
+      },
+    );
+  }
+
+  if (error instanceof ZodError) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "QUIZ_VALIDATION_ERROR",
+          message: error.issues[0]?.message ?? "Некорректные данные",
+        },
+      },
+      {
+        status: 400,
       },
     );
   }

@@ -10,6 +10,7 @@ import {
 } from "@/shared/quiz/factory";
 import type {
   QuizConfig,
+  QuizImage,
   QuizQuestion,
   QuizSettings,
 } from "@/shared/types/quiz";
@@ -43,6 +44,18 @@ interface QuizEditorState {
   ) => void;
   setSlug: (slug: string) => void;
   setTitle: (title: string) => void;
+  setQuestionImage: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    image: QuizImage | undefined,
+  ) => void;
+  setQuestionImageAlt: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    alt: string,
+  ) => void;
   updateQuestion: (
     roundId: string,
     themeId: string,
@@ -243,17 +256,69 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
   setSlug: (slug) => {
     set((state) => ({
       ...updateDraft(state, (draft) => {
+        const oldSlug = draft.slug;
         draft.slug = slug;
+        for (const round of draft.rounds) {
+          for (const theme of round.themes) {
+            for (const question of theme.questions) {
+              const image = question.content.image;
+              const prefix = `assets/${oldSlug}/`;
+              if (image?.path.startsWith(prefix) === true) {
+                image.path = `assets/${slug}/${image.path.slice(prefix.length)}`;
+              }
+            }
+          }
+        }
       }),
       slugManuallyEdited: true,
     }));
+  },
+  setQuestionImage: (roundId, themeId, questionId, image) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.content.image = image;
+        }
+      }),
+    );
+  },
+  setQuestionImageAlt: (roundId, themeId, questionId, alt) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const image = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId)
+          ?.content.image;
+        if (image !== undefined) {
+          image.alt = alt.trim() === "" ? undefined : alt;
+        }
+      }),
+    );
   },
   setTitle: (title) => {
     set((state) =>
       updateDraft(state, (draft) => {
         draft.title = title;
         if (!state.slugManuallyEdited) {
-          draft.slug = createQuizSlug(title);
+          const oldSlug = draft.slug;
+          const newSlug = createQuizSlug(title);
+          draft.slug = newSlug;
+          for (const round of draft.rounds) {
+            for (const theme of round.themes) {
+              for (const question of theme.questions) {
+                const image = question.content.image;
+                const prefix = `assets/${oldSlug}/`;
+                if (image?.path.startsWith(prefix) === true) {
+                  image.path = `assets/${newSlug}/${image.path.slice(prefix.length)}`;
+                }
+              }
+            }
+          }
         }
       }),
     );

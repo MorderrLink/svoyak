@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { rewriteQuizAssetPaths } from "@/server/media/asset-storage";
 import type { QuizConfig } from "@/shared/types/quiz";
 
 export async function createUniqueCopy(
@@ -16,7 +17,7 @@ export async function createUniqueCopy(
 
   const timestamp = new Date().toISOString();
 
-  return {
+  const copy: QuizConfig = {
     ...structuredClone(source),
     createdAt: timestamp,
     id: randomUUID(),
@@ -36,4 +37,7 @@ export async function createUniqueCopy(
     title: `${source.title} — копия`,
     updatedAt: timestamp,
   };
+
+  delete copy.packageIntegrity;
+  return rewriteQuizAssetPaths(copy, source.slug, slug);
 }

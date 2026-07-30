@@ -22,9 +22,16 @@ export async function POST(
       repository.slugExists(slug),
     );
 
-    return NextResponse.json(await repository.create(copy), {
-      status: 201,
-    });
+    const created = await repository.create(copy);
+    try {
+      await repository.getAssets().copyQuizAssets(source.slug, copy.slug);
+      return NextResponse.json(created, {
+        status: 201,
+      });
+    } catch (error: unknown) {
+      await repository.delete(created.id);
+      throw error;
+    }
   } catch (error: unknown) {
     return apiErrorResponse(error);
   }
