@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -195,6 +195,15 @@ describe("QuizRepository", () => {
       repository.getAssets().readAsset("../secret.webp"),
     ).rejects.toMatchObject({
       code: "QUIZ_VALIDATION_ERROR",
+    });
+  });
+
+  it("возвращает понятную ошибку для повреждённого JSON", async () => {
+    await writeFile(join(directory, "broken.json"), "{broken", "utf8");
+
+    await expect(repository.list()).rejects.toMatchObject({
+      code: "QUIZ_STORAGE_ERROR",
+      message: "Файл broken.json содержит повреждённый JSON",
     });
   });
 });

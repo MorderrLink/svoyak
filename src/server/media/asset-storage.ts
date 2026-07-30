@@ -14,6 +14,10 @@ import { dirname, relative, resolve, sep } from "node:path";
 import { fileTypeFromBuffer } from "file-type";
 import sharp from "sharp";
 
+import {
+  describeFileError,
+  getFileErrorCode,
+} from "@/server/file-system/file-error";
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { quizLimits } from "@/shared/constants/quiz";
 import type { QuizConfig, QuizImage } from "@/shared/types/quiz";
@@ -149,12 +153,19 @@ export class AssetStorage {
 
     const relativePath = `assets/${slug}/images/${randomUUID()}.webp`;
     const destination = this.resolveAssetPath(relativePath);
-    await mkdir(dirname(destination), {
-      recursive: true,
-    });
-    await writeFile(destination, normalized, {
-      flag: "wx",
-    });
+    try {
+      await mkdir(dirname(destination), {
+        recursive: true,
+      });
+      await writeFile(destination, normalized, {
+        flag: "wx",
+      });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось сохранить изображение: ${describeFileError(error)}`,
+      );
+    }
 
     return {
       path: relativePath,
@@ -165,8 +176,15 @@ export class AssetStorage {
     const path = this.resolveAssetPath(assetPath);
     try {
       return await readFile(path);
-    } catch {
-      throw new QuizRepositoryError("QUIZ_NOT_FOUND", "Изображение не найдено");
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        getFileErrorCode(error) === "ENOENT"
+          ? "QUIZ_NOT_FOUND"
+          : "QUIZ_STORAGE_ERROR",
+        getFileErrorCode(error) === "ENOENT"
+          ? "Изображение не найдено"
+          : `Не удалось прочитать изображение: ${describeFileError(error)}`,
+      );
     }
   }
 
@@ -178,9 +196,16 @@ export class AssetStorage {
       );
     }
 
-    await rm(this.resolveAssetPath(assetPath), {
-      force: true,
-    });
+    try {
+      await rm(this.resolveAssetPath(assetPath), {
+        force: true,
+      });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось удалить изображение: ${describeFileError(error)}`,
+      );
+    }
   }
 
   async cleanupUnused(quiz: QuizConfig): Promise<void> {
@@ -190,21 +215,34 @@ export class AssetStorage {
 
     try {
       entries = await readdir(imagesDirectory);
-    } catch {
-      return;
+    } catch (error: unknown) {
+      if (getFileErrorCode(error) === "ENOENT") {
+        return;
+      }
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось проверить каталог изображений: ${describeFileError(error)}`,
+      );
     }
 
-    await Promise.all(
-      entries.map(async (entry) => {
-        const assetPath = `assets/${quiz.slug}/images/${entry}`;
-        if (!referenced.has(assetPath)) {
-          await rm(this.resolveAssetPath(assetPath), {
-            force: true,
-            recursive: true,
-          });
-        }
-      }),
-    );
+    try {
+      await Promise.all(
+        entries.map(async (entry) => {
+          const assetPath = `assets/${quiz.slug}/images/${entry}`;
+          if (!referenced.has(assetPath)) {
+            await rm(this.resolveAssetPath(assetPath), {
+              force: true,
+              recursive: true,
+            });
+          }
+        }),
+      );
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось очистить изображения: ${describeFileError(error)}`,
+      );
+    }
   }
 
   async moveQuizAssets(oldSlug: string, newSlug: string): Promise<boolean> {
@@ -221,10 +259,17 @@ export class AssetStorage {
       return false;
     }
 
-    await mkdir(this.assetsDirectory, {
-      recursive: true,
-    });
-    await rename(source, destination);
+    try {
+      await mkdir(this.assetsDirectory, {
+        recursive: true,
+      });
+      await rename(source, destination);
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось переместить изображения: ${describeFileError(error)}`,
+      );
+    }
     return true;
   }
 
@@ -237,17 +282,31 @@ export class AssetStorage {
       return;
     }
 
-    await cp(source, this.getQuizAssetsDirectory(destinationSlug), {
-      errorOnExist: true,
-      recursive: true,
-    });
+    try {
+      await cp(source, this.getQuizAssetsDirectory(destinationSlug), {
+        errorOnExist: true,
+        recursive: true,
+      });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось скопировать изображения: ${describeFileError(error)}`,
+      );
+    }
   }
 
   async deleteQuizAssets(slug: string): Promise<void> {
-    await rm(this.getQuizAssetsDirectory(slug), {
-      force: true,
-      recursive: true,
-    });
+    try {
+      await rm(this.getQuizAssetsDirectory(slug), {
+        force: true,
+        recursive: true,
+      });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось удалить каталог изображений: ${describeFileError(error)}`,
+      );
+    }
   }
 
   resolveAssetPath(assetPath: string): string {

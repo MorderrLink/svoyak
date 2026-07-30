@@ -1,6 +1,10 @@
 import { RoomError } from "@/server/room/room-error";
 import type { PlayerRecord } from "@/server/room/types";
 import type {
+  GameSessionSnapshot,
+  ScoreOperationSnapshot,
+} from "@/server/session/session-snapshot";
+import type {
   AnswerJudgement,
   DisplayGameState,
   GameBoardTheme,
@@ -31,6 +35,7 @@ export class GameSession {
   private phase: GamePhase = "board";
   private readonly playedQuestionIds = new Set<string>();
   private readonly quiz: QuizConfig;
+  private readonly scoreOperations: ScoreOperationSnapshot[] = [];
   private scoreProposal: ScoreChangeProposal | null = null;
   private timer: TimerState | null = null;
 
@@ -40,6 +45,60 @@ export class GameSession {
     private readonly idGenerator: () => string,
   ) {
     this.quiz = structuredClone(quizSnapshot);
+  }
+
+  static fromSnapshot(
+    quizSnapshot: QuizConfig,
+    snapshot: GameSessionSnapshot,
+    now: () => number,
+    idGenerator: () => string,
+  ): GameSession {
+    const session = new GameSession(quizSnapshot, now, idGenerator);
+    session.currentRoundIndex = snapshot.currentRoundIndex;
+    session.phase = snapshot.phase;
+    session.activeQuestion =
+      snapshot.activeQuestion === null
+        ? null
+        : {
+            attemptedPlayerIds: new Set(
+              snapshot.activeQuestion.attemptedPlayerIds,
+            ),
+            currentPlayerId: snapshot.activeQuestion.currentPlayerId,
+            questionId: snapshot.activeQuestion.questionId,
+          };
+    for (const questionId of snapshot.playedQuestionIds) {
+      session.playedQuestionIds.add(questionId);
+    }
+    session.scoreOperations.push(
+      ...snapshot.scoreOperations.map((operation) => ({ ...operation })),
+    );
+    session.scoreProposal =
+      snapshot.scoreProposal === null ? null : { ...snapshot.scoreProposal };
+    session.timer = snapshot.timer === null ? null : { ...snapshot.timer };
+    session.validateRestoredState();
+    return session;
+  }
+
+  toSnapshot(): GameSessionSnapshot {
+    return {
+      activeQuestion:
+        this.activeQuestion === null
+          ? null
+          : {
+              attemptedPlayerIds: [...this.activeQuestion.attemptedPlayerIds],
+              currentPlayerId: this.activeQuestion.currentPlayerId,
+              questionId: this.activeQuestion.questionId,
+            },
+      currentRoundIndex: this.currentRoundIndex,
+      phase: this.phase,
+      playedQuestionIds: [...this.playedQuestionIds],
+      scoreOperations: this.scoreOperations.map((operation) => ({
+        ...operation,
+      })),
+      scoreProposal:
+        this.scoreProposal === null ? null : { ...this.scoreProposal },
+      timer: this.timer === null ? null : { ...this.timer },
+    };
   }
 
   getPhase(): GamePhase {
@@ -87,6 +146,11 @@ export class GameSession {
   setBuzzTimer(timer: TimerState): void {
     this.requirePhase("buzzing");
     this.timer = { ...timer };
+  }
+
+  expireBuzzTimer(): void {
+    this.requirePhase("buzzing");
+    this.timer = null;
   }
 
   beginAnswer(playerId: string): void {
@@ -182,6 +246,14 @@ export class GameSession {
     }
 
     player.score += delta;
+    this.scoreOperations.push({
+      confirmedAt: this.now(),
+      delta,
+      id: proposal.id,
+      judgement: proposal.judgement,
+      playerId: player.id,
+      questionId: proposal.questionId,
+    });
     this.scoreProposal = null;
 
     if (proposal.judgement === "correct") {
@@ -434,6 +506,47 @@ export class GameSession {
       throw new RoomError(
         "SESSION_INVALID_PHASE",
         `Ожидалась фаза ${expected}, текущая фаза ${this.phase}`,
+      );
+    }
+  }
+
+  private validateRestoredState(): void {
+    if (
+      this.currentRoundIndex >= this.quiz.rounds.length ||
+      this.currentRoundIndex < 0
+    ) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Snapshot содержит неизвестный раунд",
+      );
+    }
+
+    for (const questionId of this.playedQuestionIds) {
+      this.findQuestion(questionId);
+    }
+
+    const questionPhases = new Set<GamePhase>([
+      "answer-reveal",
+      "answering",
+      "buzzing",
+      "question-intro",
+      "score-confirmation",
+    ]);
+    if (questionPhases.has(this.phase) && this.activeQuestion === null) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Snapshot активной фазы не содержит вопрос",
+      );
+    }
+
+    if (this.activeQuestion !== null) {
+      this.findQuestion(this.activeQuestion.questionId);
+    }
+
+    if (this.phase === "score-confirmation" && this.scoreProposal === null) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Snapshot подтверждения не содержит операции баллов",
       );
     }
   }

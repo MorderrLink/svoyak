@@ -7,7 +7,10 @@ import { BottomProgress } from "@/components/bottom-progress";
 import { Button } from "@/components/button";
 import { ErrorMessage } from "@/components/error-message";
 import { LoadingState } from "@/components/loading-state";
-import { getPlayerTokenStorageKey } from "@/shared/constants/storage";
+import {
+  getPlayerTokenStorageKey,
+  playerFeedbackStorageKey,
+} from "@/shared/constants/storage";
 import type { PlayerScreenState } from "@/shared/contracts/socket";
 import { playerTokenSchema } from "@/shared/schemas/socket";
 import { createClientSocket } from "@/shared/socket/client";
@@ -26,14 +29,41 @@ const buttonLabels = {
   winner: "Вы первый!",
 } as const;
 
+function playTone(frequency: number, durationMs: number): void {
+  try {
+    const context = new AudioContext();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const endsAt = context.currentTime + durationMs / 1_000;
+
+    oscillator.frequency.value = frequency;
+    oscillator.type = "sine";
+    gain.gain.setValueAtTime(0.08, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, endsAt);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(endsAt);
+    oscillator.addEventListener("ended", () => {
+      void context.close();
+    });
+  } catch {
+    // Некоторые браузеры запрещают Web Audio до первого пользовательского жеста.
+  }
+}
+
 export function PlayerScreen({ roomCode }: PlayerScreenProps) {
   const router = useRouter();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const lastSubmittedWindowRef = useRef<string | null>(null);
   const playerTokenRef = useRef<string | null>(null);
+  const previousStatusRef = useRef<
+    PlayerScreenState["buzzer"]["status"] | null
+  >(null);
   const socketRef = useRef<ApplicationClientSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [feedbackEnabled, setFeedbackEnabled] = useState(false);
   const [sending, setSending] = useState(false);
   const [state, setState] = useState<PlayerScreenState | null>(null);
 
@@ -89,6 +119,37 @@ export function PlayerScreen({ roomCode }: PlayerScreenProps) {
       socketRef.current = null;
     };
   }, [roomCode, router]);
+
+  useEffect(() => {
+    let active = true;
+    queueMicrotask(() => {
+      if (active) {
+        setFeedbackEnabled(
+          window.localStorage.getItem(playerFeedbackStorageKey) === "enabled",
+        );
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const status = state?.buzzer.status ?? null;
+    if (
+      feedbackEnabled &&
+      status !== null &&
+      status !== previousStatusRef.current
+    ) {
+      if (status === "ready") {
+        playTone(520, 120);
+      } else if (status === "winner") {
+        playTone(880, 220);
+        navigator.vibrate?.([120, 60, 120]);
+      }
+    }
+    previousStatusRef.current = status;
+  }, [feedbackEnabled, state?.buzzer.status]);
 
   useEffect(() => {
     buttonRef.current?.focus({
@@ -171,6 +232,23 @@ export function PlayerScreen({ roomCode }: PlayerScreenProps) {
             <p className="text-xl font-semibold">{state.score}</p>
           </div>
         ) : null}
+        <Button
+          className="min-h-9 px-3 text-xs"
+          onClick={() => {
+            const enabled = !feedbackEnabled;
+            setFeedbackEnabled(enabled);
+            window.localStorage.setItem(
+              playerFeedbackStorageKey,
+              enabled ? "enabled" : "disabled",
+            );
+            if (enabled) {
+              playTone(660, 100);
+            }
+          }}
+          variant="secondary"
+        >
+          Эффекты: {feedbackEnabled ? "вкл" : "выкл"}
+        </Button>
       </header>
 
       {error === null ? null : (

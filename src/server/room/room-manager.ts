@@ -1,4 +1,9 @@
-import { randomInt, randomUUID } from "node:crypto";
+import {
+  createHash,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 
 import { RoomError } from "@/server/room/room-error";
 import type {
@@ -7,6 +12,14 @@ import type {
   RoomRecord,
 } from "@/server/room/types";
 import { GameSession } from "@/server/session/game-session";
+import type {
+  SessionEventInput,
+  SessionEventWriter,
+} from "@/server/session/session-event-journal";
+import type {
+  ActiveRoomsSnapshot,
+  RoomSnapshot,
+} from "@/server/session/session-snapshot";
 import type {
   HostRoomState,
   AnswerJudgement,
@@ -26,6 +39,7 @@ const maxCodeGenerationAttempts = 100;
 export interface RoomManagerOptions {
   codeGenerator?: () => string;
   idGenerator?: () => string;
+  journal?: SessionEventWriter;
   now?: () => number;
   tokenGenerator?: () => string;
 }
@@ -74,16 +88,32 @@ function toPublicPlayer(player: PlayerRecord): PublicPlayer {
   };
 }
 
+export function hashToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+function tokenMatches(token: string, expectedHash: string): boolean {
+  const actual = Buffer.from(hashToken(token), "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return (
+    actual.byteLength === expected.byteLength &&
+    timingSafeEqual(actual, expected)
+  );
+}
+
 export class RoomManager {
   private readonly rooms = new Map<string, RoomRecord>();
+  private readonly changeListeners = new Set<() => void>();
   private readonly codeGenerator: () => string;
   private readonly idGenerator: () => string;
+  private readonly journal: SessionEventWriter | undefined;
   private readonly now: () => number;
   private readonly tokenGenerator: () => string;
 
   constructor(options: RoomManagerOptions = {}) {
     this.codeGenerator = options.codeGenerator ?? createRoomCode;
     this.idGenerator = options.idGenerator ?? randomUUID;
+    this.journal = options.journal;
     this.now = options.now ?? Date.now;
     this.tokenGenerator = options.tokenGenerator ?? randomUUID;
   }
@@ -99,13 +129,26 @@ export class RoomManager {
       createdAt: timestamp,
       displaySocketIds: new Set(),
       hostSocketId: null,
-      hostToken,
+      hostTokenHash: hashToken(hostToken),
       lastActivityAt: timestamp,
       players: new Map(),
       quizSnapshot:
         quizSnapshot === null ? null : structuredClone(quizSnapshot),
       session: null,
     });
+    this.recordEvent({
+      ...(quizSnapshot === null
+        ? {}
+        : {
+            details: {
+              quizId: quizSnapshot.id,
+              quizTitle: quizSnapshot.title,
+            },
+          }),
+      roomCode,
+      type: "room_created",
+    });
+    this.notifyChange();
 
     return {
       hostToken,
@@ -127,6 +170,99 @@ export class RoomManager {
 
   hasRoom(roomCode: string): boolean {
     return this.rooms.has(roomCode);
+  }
+
+  getRoomCodes(): string[] {
+    return [...this.rooms.keys()];
+  }
+
+  subscribeToChanges(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  createSnapshot(): ActiveRoomsSnapshot {
+    return {
+      rooms: [...this.rooms.values()].map((room) => this.toSnapshot(room)),
+      savedAt: this.now(),
+      schemaVersion: 1,
+    };
+  }
+
+  restoreSnapshot(snapshot: ActiveRoomsSnapshot): string[] {
+    const restoredRoomCodes: string[] = [];
+
+    for (const roomSnapshot of snapshot.rooms) {
+      if (this.rooms.has(roomSnapshot.code)) {
+        console.warn(
+          `Snapshot комнаты ${roomSnapshot.code} пропущен: код уже занят`,
+        );
+        continue;
+      }
+
+      try {
+        const room = this.fromSnapshot(roomSnapshot);
+        this.rooms.set(room.code, room);
+        restoredRoomCodes.push(room.code);
+      } catch (error: unknown) {
+        console.error(
+          `Не удалось восстановить комнату ${roomSnapshot.code}:`,
+          error,
+        );
+      }
+    }
+
+    return restoredRoomCodes;
+  }
+
+  reconcileExpiredTimers(): string[] {
+    const changedRoomCodes: string[] = [];
+
+    for (const room of this.rooms.values()) {
+      const session = room.session;
+      if (session === null) {
+        continue;
+      }
+
+      const timer = session.getTimer();
+      if (
+        session.getPhase() === "question-intro" &&
+        timer !== null &&
+        timer.endsAt <= this.now()
+      ) {
+        this.completeQuestionIntro(room.code);
+        changedRoomCodes.push(room.code);
+        continue;
+      }
+
+      if (
+        session.getPhase() === "answer-reveal" &&
+        timer !== null &&
+        timer.endsAt <= this.now()
+      ) {
+        this.finishQuestion(room.code);
+        changedRoomCodes.push(room.code);
+        continue;
+      }
+
+      if (session.getPhase() === "buzzing") {
+        if (
+          room.buzzer?.status === "open" &&
+          room.buzzer.timer.endsAt <= this.now()
+        ) {
+          this.expireBuzzer(room.code, room.buzzer.id);
+          changedRoomCodes.push(room.code);
+        } else if (room.buzzer === null && timer !== null) {
+          session.expireBuzzTimer();
+          this.touch(room);
+          changedRoomCodes.push(room.code);
+        }
+      }
+    }
+
+    return [...new Set(changedRoomCodes)];
   }
 
   getRoom(roomCode: string): RoomRecord | undefined {
@@ -153,6 +289,10 @@ export class RoomManager {
 
     room.hostSocketId = socketId;
     this.touch(room);
+    this.recordEvent({
+      roomCode,
+      type: "host_connected",
+    });
 
     return {
       previousSocketId,
@@ -165,6 +305,10 @@ export class RoomManager {
     if (room?.hostSocketId === socketId) {
       room.hostSocketId = null;
       this.touch(room);
+      this.recordEvent({
+        roomCode,
+        type: "host_disconnected",
+      });
     }
   }
 
@@ -172,12 +316,20 @@ export class RoomManager {
     const room = this.requireRoom(roomCode);
     room.displaySocketIds.add(socketId);
     this.touch(room);
+    this.recordEvent({
+      roomCode,
+      type: "display_connected",
+    });
   }
 
   disconnectDisplay(roomCode: string, socketId: string): void {
     const room = this.rooms.get(roomCode);
     if (room?.displaySocketIds.delete(socketId) === true) {
       this.touch(room);
+      this.recordEvent({
+        roomCode,
+        type: "display_disconnected",
+      });
     }
   }
 
@@ -202,9 +354,17 @@ export class RoomManager {
       name: name.trim(),
       score: 0,
       socketId,
-      token: playerToken,
+      tokenHash: hashToken(playerToken),
     });
     this.touch(room);
+    this.recordEvent({
+      details: {
+        playerId,
+        playerName: name.trim(),
+      },
+      roomCode,
+      type: "player_connected",
+    });
 
     return {
       playerId,
@@ -225,6 +385,15 @@ export class RoomManager {
     player.connected = true;
     player.socketId = socketId;
     this.touch(room);
+    this.recordEvent({
+      details: {
+        playerId: player.id,
+        playerName: player.name,
+        reconnected: true,
+      },
+      roomCode,
+      type: "player_connected",
+    });
 
     return {
       playerId: player.id,
@@ -240,6 +409,14 @@ export class RoomManager {
       player.connected = false;
       player.socketId = null;
       this.touch(room);
+      this.recordEvent({
+        details: {
+          playerId: player.id,
+          playerName: player.name,
+        },
+        roomCode,
+        type: "player_disconnected",
+      });
     }
   }
 
@@ -308,6 +485,9 @@ export class RoomManager {
 
     buzzer.status = "closed";
     buzzer.closeReason = "expired";
+    if (room.session?.getPhase() === "buzzing") {
+      room.session.expireBuzzTimer();
+    }
     this.touch(room);
     return true;
   }
@@ -370,6 +550,15 @@ export class RoomManager {
       room.session.beginAnswer(player.id);
     }
     this.touch(room);
+    this.recordEvent({
+      details: {
+        playerId: player.id,
+        playerName: player.name,
+        windowId: buzzWindowId,
+      },
+      roomCode,
+      type: "buzzer_winner",
+    });
   }
 
   startSession(roomCode: string, hostToken: string): void {
@@ -386,6 +575,10 @@ export class RoomManager {
     );
     room.buzzer = null;
     this.touch(room);
+    this.recordEvent({
+      roomCode,
+      type: "session_started",
+    });
   }
 
   selectQuestion(
@@ -397,6 +590,11 @@ export class RoomManager {
     const timer = this.requireSession(room).selectQuestion(questionId);
     room.buzzer = null;
     this.touch(room);
+    this.recordEvent({
+      details: { questionId },
+      roomCode,
+      type: "question_selected",
+    });
     return timer;
   }
 
@@ -417,8 +615,21 @@ export class RoomManager {
     judgement: AnswerJudgement,
   ): void {
     const room = this.requireHost(roomCode, hostToken);
-    this.requireSession(room).judgeAnswer(judgement, room.players);
+    const proposal = this.requireSession(room).judgeAnswer(
+      judgement,
+      room.players,
+    );
     this.touch(room);
+    this.recordEvent({
+      details: {
+        judgement,
+        playerId: proposal.playerId,
+        playerName: proposal.playerName,
+        questionId: proposal.questionId,
+      },
+      roomCode,
+      type: "answer_judged",
+    });
   }
 
   cancelScoreProposal(roomCode: string, hostToken: string): void {
@@ -435,6 +646,7 @@ export class RoomManager {
   ): "answer-reveal" | "buzzing" {
     const room = this.requireHost(roomCode, hostToken);
     const session = this.requireSession(room);
+    const proposal = session.getState().scoreProposal;
     const outcome = session.confirmScore(proposalId, delta, room.players);
 
     if (outcome === "buzzing") {
@@ -447,6 +659,16 @@ export class RoomManager {
     }
 
     this.touch(room);
+    this.recordEvent({
+      details: {
+        delta,
+        outcome,
+        playerId: proposal?.playerId ?? null,
+        proposalId,
+      },
+      roomCode,
+      type: "score_confirmed",
+    });
     return outcome;
   }
 
@@ -460,9 +682,16 @@ export class RoomManager {
 
   finishQuestion(roomCode: string): void {
     const room = this.requireRoom(roomCode);
+    const questionId =
+      this.requireSession(room).getState().activeQuestion?.id ?? null;
     this.requireSession(room).finishQuestion();
     room.buzzer = null;
     this.touch(room);
+    this.recordEvent({
+      details: { questionId },
+      roomCode,
+      type: "question_finished",
+    });
   }
 
   finishSession(roomCode: string, hostToken: string): void {
@@ -470,6 +699,10 @@ export class RoomManager {
     this.requireSession(room).finishSession();
     room.buzzer = null;
     this.touch(room);
+    this.recordEvent({
+      roomCode,
+      type: "session_finished",
+    });
   }
 
   getHostState(roomCode: string): HostRoomState {
@@ -494,6 +727,11 @@ export class RoomManager {
                 name: winner.name,
               },
       },
+      connectedClientCount:
+        (room.hostSocketId === null ? 0 : 1) +
+        room.displaySocketIds.size +
+        [...room.players.values()].filter((player) => player.connected).length,
+      connectedDisplayCount: room.displaySocketIds.size,
       game: room.session?.getState() ?? null,
       players: [...room.players.values()]
         .map(toPublicPlayer)
@@ -588,16 +826,151 @@ export class RoomManager {
       ) {
         this.rooms.delete(roomCode);
         deletedRoomCodes.push(roomCode);
+        this.recordEvent({
+          roomCode,
+          type: "room_deleted",
+        });
       }
+    }
+
+    if (deletedRoomCodes.length > 0) {
+      this.notifyChange();
     }
 
     return deletedRoomCodes;
   }
 
+  private toSnapshot(room: RoomRecord): RoomSnapshot {
+    return {
+      buzzer:
+        room.buzzer === null
+          ? null
+          : {
+              closeReason: room.buzzer.closeReason,
+              id: room.buzzer.id,
+              pressedPlayerIds: [...room.buzzer.pressedPlayerIds],
+              status: room.buzzer.status,
+              timer: { ...room.buzzer.timer },
+              winnerPlayerId: room.buzzer.winnerPlayerId,
+            },
+      code: room.code,
+      createdAt: room.createdAt,
+      hostTokenHash: room.hostTokenHash,
+      lastActivityAt: room.lastActivityAt,
+      players: [...room.players.values()].map((player) => ({
+        id: player.id,
+        name: player.name,
+        score: player.score,
+        tokenHash: player.tokenHash,
+      })),
+      quizSnapshot:
+        room.quizSnapshot === null ? null : structuredClone(room.quizSnapshot),
+      session: room.session?.toSnapshot() ?? null,
+    };
+  }
+
+  private fromSnapshot(snapshot: RoomSnapshot): RoomRecord {
+    if (snapshot.session !== null && snapshot.quizSnapshot === null) {
+      throw new RoomError(
+        "QUIZ_NOT_FOUND",
+        "Snapshot сессии не содержит викторину",
+      );
+    }
+
+    const players = new Map<string, PlayerRecord>();
+    for (const player of snapshot.players) {
+      if (players.has(player.id)) {
+        throw new RoomError(
+          "PLAYER_UNAUTHORIZED",
+          "Snapshot содержит повторяющийся идентификатор игрока",
+        );
+      }
+      players.set(player.id, {
+        connected: false,
+        id: player.id,
+        name: player.name,
+        score: player.score,
+        socketId: null,
+        tokenHash: player.tokenHash,
+      });
+    }
+
+    const referencedPlayerIds = new Set<string>();
+    if (snapshot.buzzer !== null) {
+      for (const playerId of snapshot.buzzer.pressedPlayerIds) {
+        referencedPlayerIds.add(playerId);
+      }
+      if (snapshot.buzzer.winnerPlayerId !== null) {
+        referencedPlayerIds.add(snapshot.buzzer.winnerPlayerId);
+      }
+    }
+    const activeQuestion = snapshot.session?.activeQuestion;
+    if (activeQuestion !== null && activeQuestion !== undefined) {
+      for (const playerId of activeQuestion.attemptedPlayerIds) {
+        referencedPlayerIds.add(playerId);
+      }
+      if (activeQuestion.currentPlayerId !== null) {
+        referencedPlayerIds.add(activeQuestion.currentPlayerId);
+      }
+    }
+    const scoreProposal = snapshot.session?.scoreProposal;
+    if (scoreProposal !== null && scoreProposal !== undefined) {
+      referencedPlayerIds.add(scoreProposal.playerId);
+    }
+    for (const operation of snapshot.session?.scoreOperations ?? []) {
+      referencedPlayerIds.add(operation.playerId);
+    }
+    for (const playerId of referencedPlayerIds) {
+      if (!players.has(playerId)) {
+        throw new RoomError(
+          "PLAYER_UNAUTHORIZED",
+          "Snapshot ссылается на неизвестного игрока",
+        );
+      }
+    }
+
+    const quizSnapshot =
+      snapshot.quizSnapshot === null
+        ? null
+        : structuredClone(snapshot.quizSnapshot);
+    const session =
+      snapshot.session === null || quizSnapshot === null
+        ? null
+        : GameSession.fromSnapshot(
+            quizSnapshot,
+            snapshot.session,
+            this.now,
+            this.idGenerator,
+          );
+
+    return {
+      buzzer:
+        snapshot.buzzer === null
+          ? null
+          : {
+              closeReason: snapshot.buzzer.closeReason,
+              id: snapshot.buzzer.id,
+              pressedPlayerIds: new Set(snapshot.buzzer.pressedPlayerIds),
+              status: snapshot.buzzer.status,
+              timer: { ...snapshot.buzzer.timer },
+              winnerPlayerId: snapshot.buzzer.winnerPlayerId,
+            },
+      code: snapshot.code,
+      createdAt: snapshot.createdAt,
+      displaySocketIds: new Set(),
+      hostSocketId: null,
+      hostTokenHash: snapshot.hostTokenHash,
+      lastActivityAt: this.now(),
+      players,
+      quizSnapshot,
+      session,
+    };
+  }
+
   private requireHost(roomCode: string, hostToken: string): RoomRecord {
     const room = this.requireRoom(roomCode);
 
-    if (room.hostToken !== hostToken) {
+    if (!tokenMatches(hostToken, room.hostTokenHash)) {
       throw new RoomError("HOST_UNAUTHORIZED", "Нет доступа к комнате");
     }
 
@@ -608,8 +981,8 @@ export class RoomManager {
     room: RoomRecord,
     playerToken: string,
   ): PlayerRecord {
-    const player = [...room.players.values()].find(
-      (candidate) => candidate.token === playerToken,
+    const player = [...room.players.values()].find((candidate) =>
+      tokenMatches(playerToken, candidate.tokenHash),
     );
 
     if (player === undefined) {
@@ -655,6 +1028,17 @@ export class RoomManager {
 
   private touch(room: RoomRecord): void {
     room.lastActivityAt = this.now();
+    this.notifyChange();
+  }
+
+  private notifyChange(): void {
+    for (const listener of this.changeListeners) {
+      listener();
+    }
+  }
+
+  private recordEvent(event: SessionEventInput): void {
+    this.journal?.record(event);
   }
 
   private requireSession(room: RoomRecord): GameSession {
@@ -685,6 +1069,14 @@ export class RoomManager {
     };
 
     room.buzzer = buzzer;
+    this.recordEvent({
+      details: {
+        durationMs,
+        windowId: buzzer.id,
+      },
+      roomCode: room.code,
+      type: "buzzer_opened",
+    });
     return {
       buzzWindowId: buzzer.id,
       timer,

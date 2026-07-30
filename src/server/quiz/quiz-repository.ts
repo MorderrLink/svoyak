@@ -11,6 +11,10 @@ import {
 } from "node:fs/promises";
 import { dirname, extname, resolve } from "node:path";
 
+import {
+  describeFileError,
+  getFileErrorCode,
+} from "@/server/file-system/file-error";
 import { AssetStorage } from "@/server/media/asset-storage";
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { quizConfigSchema } from "@/shared/schemas/quiz";
@@ -162,8 +166,15 @@ export class QuizRepository {
       throw new QuizRepositoryError("QUIZ_NOT_FOUND", "Викторина не найдена");
     }
 
-    await unlink(stored.path);
-    await this.assetStorage.deleteQuizAssets(stored.quiz.slug);
+    try {
+      await unlink(stored.path);
+      await this.assetStorage.deleteQuizAssets(stored.quiz.slug);
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось удалить викторину: ${describeFileError(error)}`,
+      );
+    }
   }
 
   async findBySlug(slug: string): Promise<QuizConfig | undefined> {
@@ -185,9 +196,16 @@ export class QuizRepository {
   }
 
   private async ensureDirectory(): Promise<void> {
-    await mkdir(this.gamesDirectory, {
-      recursive: true,
-    });
+    try {
+      await mkdir(this.gamesDirectory, {
+        recursive: true,
+      });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Каталог games недоступен: ${describeFileError(error)}`,
+      );
+    }
   }
 
   private getConfigPath(slug: string): string {
@@ -235,10 +253,25 @@ export class QuizRepository {
 
       try {
         const source = await readFile(path, "utf8");
-        const json: unknown = JSON.parse(source);
+        let json: unknown;
+        try {
+          json = JSON.parse(source) as unknown;
+        } catch {
+          throw new QuizRepositoryError(
+            "QUIZ_STORAGE_ERROR",
+            `Файл ${entry.name} содержит повреждённый JSON`,
+          );
+        }
+        const parsed = quizConfigSchema.safeParse(json);
+        if (!parsed.success) {
+          throw new QuizRepositoryError(
+            "QUIZ_STORAGE_ERROR",
+            `Файл ${entry.name} повреждён: ${parsed.error.issues[0]?.message ?? "некорректный формат"}`,
+          );
+        }
         quizzes.push({
           path,
-          quiz: this.parseQuiz(json),
+          quiz: parsed.data,
         });
       } catch (error: unknown) {
         if (error instanceof QuizRepositoryError) {
@@ -247,7 +280,7 @@ export class QuizRepository {
 
         throw new QuizRepositoryError(
           "QUIZ_STORAGE_ERROR",
-          `Не удалось прочитать ${entry.name}: ${String(error)}`,
+          `Не удалось прочитать ${entry.name}: ${describeFileError(error)}`,
         );
       }
     }
@@ -275,12 +308,20 @@ export class QuizRepository {
     } catch (error: unknown) {
       throw new QuizRepositoryError(
         "QUIZ_STORAGE_ERROR",
-        `Не удалось сохранить викторину: ${String(error)}`,
+        `Не удалось сохранить викторину: ${describeFileError(error)}`,
       );
     } finally {
-      await rm(temporaryPath, {
-        force: true,
-      });
+      try {
+        await rm(temporaryPath, {
+          force: true,
+        });
+      } catch (cleanupError: unknown) {
+        if (getFileErrorCode(cleanupError) !== "ENOENT") {
+          console.warn(
+            `Не удалось очистить временный файл викторины: ${describeFileError(cleanupError)}`,
+          );
+        }
+      }
     }
   }
 }
