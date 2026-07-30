@@ -10,6 +10,7 @@ import { GameSession } from "@/server/session/game-session";
 import type {
   HostRoomState,
   AnswerJudgement,
+  DisplayRoomState,
   PlayerBuzzerStatus,
   PlayerScreenState,
   PublicPlayer,
@@ -96,6 +97,7 @@ export class RoomManager {
       buzzer: null,
       code: roomCode,
       createdAt: timestamp,
+      displaySocketIds: new Set(),
       hostSocketId: null,
       hostToken,
       lastActivityAt: timestamp,
@@ -162,6 +164,19 @@ export class RoomManager {
 
     if (room?.hostSocketId === socketId) {
       room.hostSocketId = null;
+      this.touch(room);
+    }
+  }
+
+  attachDisplay(roomCode: string, socketId: string): void {
+    const room = this.requireRoom(roomCode);
+    room.displaySocketIds.add(socketId);
+    this.touch(room);
+  }
+
+  disconnectDisplay(roomCode: string, socketId: string): void {
+    const room = this.rooms.get(roomCode);
+    if (room?.displaySocketIds.delete(socketId) === true) {
       this.touch(room);
     }
   }
@@ -516,6 +531,34 @@ export class RoomManager {
     };
   }
 
+  getDisplayState(roomCode: string): DisplayRoomState {
+    const room = this.requireRoom(roomCode);
+    const players = [...room.players.values()];
+    const showScores =
+      room.session?.getPhase() === "game-finished" ||
+      room.quizSnapshot?.settings.showScoresToPlayers !== false;
+
+    return {
+      connectedPlayerCount: players.filter((player) => player.connected).length,
+      game: room.session?.getDisplayState(room.players) ?? null,
+      players: players
+        .map((player) => ({
+          name: player.name,
+          score: showScores ? player.score : null,
+        }))
+        .sort((left, right) => {
+          if (left.score === null || right.score === null) {
+            return left.name.localeCompare(right.name);
+          }
+          return (
+            right.score - left.score || left.name.localeCompare(right.name)
+          );
+        }),
+      quizTitle: room.quizSnapshot?.title ?? null,
+      roomCode: room.code,
+    };
+  }
+
   getPublicRoomState(roomCode: string): PublicRoomState {
     const room = this.requireRoom(roomCode);
 
@@ -539,6 +582,7 @@ export class RoomManager {
 
       if (
         room.hostSocketId === null &&
+        room.displaySocketIds.size === 0 &&
         !hasConnectedPlayer &&
         now - room.lastActivityAt >= maxIdleMs
       ) {

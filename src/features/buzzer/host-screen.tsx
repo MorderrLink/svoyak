@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -16,6 +17,7 @@ import { hostSessionStorageKey } from "@/shared/constants/storage";
 import type {
   AnswerJudgement,
   CreateRoomResult,
+  GameBoardTheme,
   HostRoomState,
   ScoreChangeProposal,
   SocketError,
@@ -56,7 +58,12 @@ function getErrorMessage(error: SocketError): string {
   return error.message;
 }
 
-export function HostScreen() {
+export interface HostScreenProps {
+  roomCode?: string;
+}
+
+export function HostScreen({ roomCode }: HostScreenProps) {
+  const router = useRouter();
   const socketRef = useRef<ApplicationClientSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +116,11 @@ export function HostScreen() {
     socket.on("connect", () => {
       setConnected(true);
       const storedSession = readStoredSession();
-      if (storedSession === null) return;
+      if (roomCode === undefined) return;
+      if (storedSession === null || storedSession.roomCode !== roomCode) {
+        setError("В этом браузере нет токена управления данной комнатой");
+        return;
+      }
 
       setSession(storedSession);
       setSelectedBaseUrl(selectPreferredUrl(storedSession.applicationUrls));
@@ -143,7 +154,7 @@ export function HostScreen() {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, []);
+  }, [roomCode]);
 
   const proposal = roomState?.game?.scoreProposal ?? null;
 
@@ -190,6 +201,7 @@ export function HostScreen() {
       setSession(result.data);
       setSelectedBaseUrl(selectPreferredUrl(result.data.applicationUrls));
       setError(null);
+      router.push(`/host/${result.data.roomCode}`);
     });
   };
 
@@ -274,6 +286,28 @@ export function HostScreen() {
   };
 
   if (session === null) {
+    if (roomCode !== undefined) {
+      return (
+        <main className="grid h-full place-items-center bg-slate-950 p-6 text-white">
+          <section className="w-full max-w-lg rounded-2xl bg-slate-900 p-6 text-center">
+            <h1 className="text-2xl font-semibold">Нет доступа к комнате</h1>
+            <p className="mt-3 text-slate-300">
+              Откройте панель в браузере, где создавалась комната.
+            </p>
+            {error === null ? null : (
+              <ErrorMessage className="mt-4">{error}</ErrorMessage>
+            )}
+            <Link
+              className="mt-5 inline-flex min-h-11 items-center rounded-lg bg-blue-600 px-4 py-2"
+              href="/host"
+            >
+              Создать новую комнату
+            </Link>
+          </section>
+        </main>
+      );
+    }
+
     return (
       <main className="grid h-full place-items-center bg-slate-950 p-6 text-white">
         <section className="w-full max-w-xl rounded-2xl bg-slate-900 p-6 shadow-2xl">
@@ -369,6 +403,17 @@ export function HostScreen() {
               Завершить игру
             </Button>
           ) : null}
+          <Button
+            onClick={() => {
+              window.open(
+                `/display/${session.roomCode}`,
+                `svoyak-display-${session.roomCode}`,
+              );
+            }}
+            variant="secondary"
+          >
+            Открыть публичный экран
+          </Button>
         </header>
 
         {error === null ? null : (
@@ -402,29 +447,7 @@ export function HostScreen() {
                   Раунд {game.currentRoundIndex + 1} из {game.roundCount}
                 </h2>
               </div>
-              <div className="mt-5 grid auto-cols-fr grid-flow-col gap-3">
-                {game.board.map((theme) => (
-                  <div className="grid content-start gap-2" key={theme.id}>
-                    <h3 className="min-h-16 rounded-lg bg-slate-800 p-3 text-center font-semibold">
-                      {theme.title}
-                    </h3>
-                    {theme.questions.map((question) => (
-                      <Button
-                        aria-label={`${theme.title}, ${question.price}`}
-                        className="min-h-16 text-xl"
-                        disabled={question.played}
-                        key={question.id}
-                        onClick={() => {
-                          selectQuestion(question.id);
-                        }}
-                        variant={question.played ? "secondary" : "primary"}
-                      >
-                        {question.played ? "—" : question.price}
-                      </Button>
-                    ))}
-                  </div>
-                ))}
-              </div>
+              <HostBoard board={game.board} onSelect={selectQuestion} />
             </section>
           ) : game.phase === "question-intro" ? (
             <PhaseCard
@@ -483,6 +506,20 @@ export function HostScreen() {
               {game.phase === "buzzing" ? (
                 <div className="mt-5 flex flex-wrap gap-2">
                   <p className="w-full text-lg">Ждём нажатия игроков…</p>
+                  {activeQuestion?.attemptedPlayerIds.length === 0 ? null : (
+                    <p className="w-full text-sm text-slate-400">
+                      Уже отвечали:{" "}
+                      {activeQuestion?.attemptedPlayerIds
+                        .map(
+                          (playerId) =>
+                            roomState?.players.find(
+                              (player) => player.id === playerId,
+                            )?.name,
+                        )
+                        .filter((name) => name !== undefined)
+                        .join(", ")}
+                    </p>
+                  )}
                   <Button
                     onClick={() => {
                       command("question:finish");
@@ -584,6 +621,61 @@ export function HostScreen() {
 
       <BottomProgress timer={game?.timer ?? roomState?.buzzer.timer ?? null} />
     </main>
+  );
+}
+
+function HostBoard({
+  board,
+  onSelect,
+}: {
+  board: GameBoardTheme[];
+  onSelect: (questionId: string) => void;
+}) {
+  const maxQuestionCount = Math.max(
+    1,
+    ...board.map((theme) => theme.questions.length),
+  );
+
+  return (
+    <div
+      className="mt-5 grid gap-2"
+      style={{
+        gridTemplateColumns: `minmax(10rem, 1.4fr) repeat(${maxQuestionCount}, minmax(4rem, 1fr))`,
+      }}
+    >
+      {board.map((theme) => (
+        <div className="contents" key={theme.id}>
+          <h3 className="grid min-h-16 place-items-center rounded-lg bg-slate-800 p-3 text-center font-semibold">
+            {theme.title}
+          </h3>
+          {Array.from({ length: maxQuestionCount }, (_, questionIndex) => {
+            const question = theme.questions[questionIndex];
+
+            return question === undefined ? (
+              <div
+                aria-hidden
+                className="min-h-16 rounded-lg bg-slate-950/30"
+                key={`${theme.id}-empty-${questionIndex}`}
+              />
+            ) : (
+              <Button
+                aria-label={`${theme.title}, ${question.price}`}
+                className="min-h-16 text-xl"
+                data-testid="host-board-price"
+                disabled={question.played}
+                key={question.id}
+                onClick={() => {
+                  onSelect(question.id);
+                }}
+                variant={question.played ? "secondary" : "primary"}
+              >
+                {question.played ? "—" : question.price}
+              </Button>
+            );
+          })}
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -162,6 +162,13 @@ function emitRoomState(
     );
   }
 
+  for (const displaySocketId of room.displaySocketIds) {
+    io.to(displaySocketId).emit(
+      "display:state",
+      roomManager.getDisplayState(roomCode),
+    );
+  }
+
   for (const player of room.players.values()) {
     if (player.socketId !== null) {
       io.to(player.socketId).emit(
@@ -266,6 +273,29 @@ export function registerSocketHandlers(
         exists: roomManager.hasRoom(parsed.data.roomCode),
         roomCode: parsed.data.roomCode,
       });
+    });
+
+    socket.on("room:attach-display", (payload, callback) => {
+      const parsed = parsePayload(checkRoomPayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.attachDisplay(parsed.data.roomCode, socket.id);
+        socket.data = {
+          role: "display",
+          roomCode: parsed.data.roomCode,
+        };
+        respondWithSuccess(socket, callback, {
+          completed: true,
+        });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
     });
 
     socket.on("room:create", (payload, callback) => {
@@ -649,6 +679,8 @@ export function registerSocketHandlers(
 
       if (role === "host") {
         roomManager.disconnectHost(roomCode, socket.id);
+      } else if (role === "display") {
+        roomManager.disconnectDisplay(roomCode, socket.id);
       } else if (playerId !== undefined) {
         roomManager.disconnectPlayer(roomCode, playerId, socket.id);
       }

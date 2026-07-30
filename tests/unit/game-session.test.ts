@@ -154,6 +154,72 @@ describe("игровая сессия", () => {
     expect(manager.getHostState(room.roomCode).game?.phase).toBe("answering");
   });
 
+  it("отделяет публичное состояние от приватных данных ведущего", () => {
+    const quiz = createQuiz();
+    const question = quiz.rounds[0]!.themes[0]!.questions[0]!;
+    question.hostComment = "Секретная подсказка ведущему";
+    question.content.image = {
+      alt: "Тестовое изображение",
+      path: "assets/test-game/images/question.webp",
+    };
+    const manager = createManager();
+    const room = manager.createRoom(quiz);
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+
+    const introState = manager.getDisplayState(room.roomCode);
+    expect(introState.game?.activeQuestion).toMatchObject({
+      answer: null,
+      currentPlayerName: null,
+      image: null,
+      price: 100,
+      text: null,
+      themeTitle: "Тема 1",
+    });
+    expect(JSON.stringify(introState)).not.toContain(
+      "Секретная подсказка ведущему",
+    );
+
+    const buzzer = manager.completeQuestionIntro(room.roomCode);
+    const questionState = manager.getDisplayState(room.roomCode);
+    expect(questionState.game?.activeQuestion).toMatchObject({
+      answer: null,
+      currentPlayerName: null,
+      image: question.content.image,
+      text: "Вопрос 1",
+    });
+    expect(JSON.stringify(questionState)).not.toContain("Ответ 1");
+    expect(JSON.stringify(questionState)).not.toContain(
+      "Секретная подсказка ведущему",
+    );
+
+    manager.pressBuzzer(room.roomCode, player.playerToken, buzzer.buzzWindowId);
+    expect(
+      manager.getDisplayState(room.roomCode).game?.activeQuestion,
+    ).toMatchObject({
+      answer: null,
+      currentPlayerName: "Анна",
+    });
+
+    manager.judgeAnswer(room.roomCode, room.hostToken, "correct");
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    manager.confirmScore(
+      room.roomCode,
+      room.hostToken,
+      proposal!.id,
+      proposal!.suggestedDelta,
+    );
+
+    const revealState = manager.getDisplayState(room.roomCode);
+    expect(revealState.game?.phase).toBe("answer-reveal");
+    expect(revealState.game?.activeQuestion?.answer).toBe("Ответ 1");
+    expect(JSON.stringify(revealState)).not.toContain(
+      "Секретная подсказка ведущему",
+    );
+  });
+
   it("завершает вопрос, переходит к следующему раунду и завершает игру", () => {
     const manager = createManager();
     const room = manager.createRoom(createQuiz());

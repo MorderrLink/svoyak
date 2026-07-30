@@ -2,6 +2,7 @@ import { RoomError } from "@/server/room/room-error";
 import type { PlayerRecord } from "@/server/room/types";
 import type {
   AnswerJudgement,
+  DisplayGameState,
   GameBoardTheme,
   GamePhase,
   HostActiveQuestion,
@@ -264,6 +265,47 @@ export class GameSession {
       roundCount: this.quiz.rounds.length,
       scoreProposal:
         this.scoreProposal === null ? null : { ...this.scoreProposal },
+      timer: this.timer === null ? null : { ...this.timer },
+    };
+  }
+
+  getDisplayState(players: Map<string, PlayerRecord>): DisplayGameState {
+    const activeQuestion = this.getHostActiveQuestion();
+    const showsQuestion =
+      this.phase === "answer-reveal" ||
+      this.phase === "answering" ||
+      this.phase === "buzzing" ||
+      this.phase === "score-confirmation";
+    const showsActiveQuestion =
+      showsQuestion || this.phase === "question-intro";
+    const currentPlayer =
+      activeQuestion?.currentPlayerId === null ||
+      activeQuestion?.currentPlayerId === undefined
+        ? undefined
+        : players.get(activeQuestion.currentPlayerId);
+
+    return {
+      activeQuestion:
+        !showsActiveQuestion || activeQuestion === null
+          ? null
+          : {
+              answer:
+                this.phase === "answer-reveal" ? activeQuestion.answer : null,
+              currentPlayerName:
+                this.phase === "answering" ||
+                this.phase === "score-confirmation"
+                  ? (currentPlayer?.name ?? null)
+                  : null,
+              id: activeQuestion.id,
+              image: showsQuestion ? activeQuestion.image : null,
+              price: activeQuestion.price,
+              text: showsQuestion ? activeQuestion.text : null,
+              themeTitle: activeQuestion.themeTitle,
+            },
+      board: this.getBoard(),
+      currentRoundIndex: this.currentRoundIndex,
+      phase: this.phase,
+      roundCount: this.quiz.rounds.length,
       timer: this.timer === null ? null : { ...this.timer },
     };
   }

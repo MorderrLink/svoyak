@@ -28,6 +28,7 @@ export interface RoomRecord {
   buzzer: BuzzerWindowRecord | null;
   code: string;
   createdAt: number;
+  displaySocketIds: Set<string>;
   hostSocketId: string | null;
   hostToken: string;
   lastActivityAt: number;

@@ -64,6 +64,38 @@ export interface HostRoomState {
   roomCode: string;
 }
 
+export interface DisplayPlayer {
+  name: string;
+  score: number | null;
+}
+
+export interface DisplayQuestion {
+  answer: string | null;
+  currentPlayerName: string | null;
+  id: string;
+  image: QuizImage | null;
+  price: number;
+  text: string | null;
+  themeTitle: string;
+}
+
+export interface DisplayGameState {
+  activeQuestion: DisplayQuestion | null;
+  board: GameBoardTheme[];
+  currentRoundIndex: number;
+  phase: GamePhase;
+  roundCount: number;
+  timer: TimerState | null;
+}
+
+export interface DisplayRoomState {
+  connectedPlayerCount: number;
+  game: DisplayGameState | null;
+  players: DisplayPlayer[];
+  quizTitle: string | null;
+  roomCode: string;
+}
+
 export type PlayerBuzzerStatus =
   | "answered-incorrectly"
   | "other-player-answering"
@@ -242,6 +274,10 @@ export interface ConfirmScorePayload extends HostCommandPayload {
 }
 
 export interface ClientToServerEvents {
+  "room:attach-display": (
+    payload: CheckRoomPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
   "buzzer:close": (
     payload: HostCommandPayload,
     callback: (result: SocketResult<CommandResult>) => void,
@@ -309,6 +345,7 @@ export interface ClientToServerEvents {
 }
 
 export interface ServerToClientEvents {
+  "display:state": (state: DisplayRoomState) => void;
   error: (error: SocketError) => void;
   "host:state": (state: HostRoomState) => void;
   "player:state": (state: PlayerScreenState) => void;
@@ -318,6 +355,6 @@ export type InterServerEvents = Record<never, never>;
 
 export interface SocketData {
   playerId?: string;
-  role?: "host" | "player";
+  role?: "display" | "host" | "player";
   roomCode?: string;
 }
