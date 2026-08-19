@@ -17,19 +17,17 @@ import type {
   SessionEventWriter,
 } from "@/server/session/session-event-journal";
 import type {
-  ActiveRoomsSnapshot,
-  RoomSnapshot,
-} from "@/server/session/session-snapshot";
-import type {
   HostRoomState,
   AnswerJudgement,
   DisplayRoomState,
+  HostPlayer,
   PlayerBuzzerStatus,
   PlayerScreenState,
   PublicPlayer,
   PublicRoomState,
   TimerState,
 } from "@/shared/contracts/socket";
+import { roomNameSchema } from "@/shared/schemas/socket";
 import type { QuizConfig } from "@/shared/types/quiz";
 
 const roomCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -69,6 +67,10 @@ export interface OpenedBuzzer {
   timer: TimerState;
 }
 
+export interface PlayerConnectionMetadata {
+  device: string;
+}
+
 function createRoomCode(): string {
   let code = "";
 
@@ -101,9 +103,19 @@ function tokenMatches(token: string, expectedHash: string): boolean {
   );
 }
 
+function parsePlayerName(name: string): string {
+  const parsed = roomNameSchema.safeParse(name);
+  if (!parsed.success) {
+    throw new RoomError(
+      "INVALID_PAYLOAD",
+      parsed.error.issues[0]?.message ?? "Некорректное имя игрока",
+    );
+  }
+  return parsed.data;
+}
+
 export class RoomManager {
   private readonly rooms = new Map<string, RoomRecord>();
-  private readonly changeListeners = new Set<() => void>();
   private readonly codeGenerator: () => string;
   private readonly idGenerator: () => string;
   private readonly journal: SessionEventWriter | undefined;
@@ -126,7 +138,6 @@ export class RoomManager {
     this.rooms.set(roomCode, {
       buzzer: null,
       code: roomCode,
-      createdAt: timestamp,
       displaySocketIds: new Set(),
       hostSocketId: null,
       hostTokenHash: hashToken(hostToken),
@@ -148,7 +159,6 @@ export class RoomManager {
       roomCode,
       type: "room_created",
     });
-    this.notifyChange();
 
     return {
       hostToken,
@@ -174,95 +184,6 @@ export class RoomManager {
 
   getRoomCodes(): string[] {
     return [...this.rooms.keys()];
-  }
-
-  subscribeToChanges(listener: () => void): () => void {
-    this.changeListeners.add(listener);
-    return () => {
-      this.changeListeners.delete(listener);
-    };
-  }
-
-  createSnapshot(): ActiveRoomsSnapshot {
-    return {
-      rooms: [...this.rooms.values()].map((room) => this.toSnapshot(room)),
-      savedAt: this.now(),
-      schemaVersion: 1,
-    };
-  }
-
-  restoreSnapshot(snapshot: ActiveRoomsSnapshot): string[] {
-    const restoredRoomCodes: string[] = [];
-
-    for (const roomSnapshot of snapshot.rooms) {
-      if (this.rooms.has(roomSnapshot.code)) {
-        console.warn(
-          `Snapshot комнаты ${roomSnapshot.code} пропущен: код уже занят`,
-        );
-        continue;
-      }
-
-      try {
-        const room = this.fromSnapshot(roomSnapshot);
-        this.rooms.set(room.code, room);
-        restoredRoomCodes.push(room.code);
-      } catch (error: unknown) {
-        console.error(
-          `Не удалось восстановить комнату ${roomSnapshot.code}:`,
-          error,
-        );
-      }
-    }
-
-    return restoredRoomCodes;
-  }
-
-  reconcileExpiredTimers(): string[] {
-    const changedRoomCodes: string[] = [];
-
-    for (const room of this.rooms.values()) {
-      const session = room.session;
-      if (session === null) {
-        continue;
-      }
-
-      const timer = session.getTimer();
-      if (
-        session.getPhase() === "question-intro" &&
-        timer !== null &&
-        timer.endsAt <= this.now()
-      ) {
-        this.completeQuestionIntro(room.code);
-        changedRoomCodes.push(room.code);
-        continue;
-      }
-
-      if (
-        session.getPhase() === "answer-reveal" &&
-        timer !== null &&
-        timer.endsAt <= this.now()
-      ) {
-        this.finishQuestion(room.code);
-        changedRoomCodes.push(room.code);
-        continue;
-      }
-
-      if (session.getPhase() === "buzzing") {
-        if (
-          room.buzzer?.status === "open" &&
-          room.buzzer.timer.endsAt <= this.now()
-        ) {
-          this.expireBuzzer(room.code, room.buzzer.id);
-          changedRoomCodes.push(room.code);
-        } else if (room.buzzer === null && timer !== null) {
-          session.expireBuzzTimer();
-          this.touch(room);
-          changedRoomCodes.push(room.code);
-        }
-      }
-    }
-
-    return [...new Set(changedRoomCodes)];
   }
 
   getRoom(roomCode: string): RoomRecord | undefined {
@@ -333,12 +254,27 @@ export class RoomManager {
     }
   }
 
-  addPlayer(roomCode: string, name: string, socketId: string): AddedPlayer {
+  addPlayer(
+    roomCode: string,
+    name: string,
+    socketId: string,
+    metadata: PlayerConnectionMetadata = {
+      device: "Неизвестное устройство",
+    },
+  ): AddedPlayer {
     const room = this.requireRoom(roomCode);
-    const normalizedName = name.trim().toLocaleLowerCase("ru-RU");
+
+    if (room.session !== null) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Игра уже началась, новые игроки больше не подключаются",
+      );
+    }
+
+    const playerName = parsePlayerName(name);
+    const normalizedName = playerName.toLocaleLowerCase("ru-RU");
     const nameIsTaken = [...room.players.values()].some(
-      (player) =>
-        player.name.trim().toLocaleLowerCase("ru-RU") === normalizedName,
+      (player) => player.name.toLocaleLowerCase("ru-RU") === normalizedName,
     );
 
     if (nameIsTaken) {
@@ -350,8 +286,11 @@ export class RoomManager {
 
     room.players.set(playerId, {
       connected: true,
+      device: metadata.device,
       id: playerId,
-      name: name.trim(),
+      joinedAt: this.now(),
+      name: playerName,
+      pingMs: null,
       score: 0,
       socketId,
       tokenHash: hashToken(playerToken),
@@ -360,7 +299,7 @@ export class RoomManager {
     this.recordEvent({
       details: {
         playerId,
-        playerName: name.trim(),
+        playerName,
       },
       roomCode,
       type: "player_connected",
@@ -377,12 +316,16 @@ export class RoomManager {
     roomCode: string,
     playerToken: string,
     socketId: string,
+    metadata?: PlayerConnectionMetadata,
   ): ReconnectedPlayer {
     const room = this.requireRoom(roomCode);
     const player = this.findPlayerByToken(room, playerToken);
     const previousSocketId = player.socketId;
 
     player.connected = true;
+    if (metadata !== undefined) {
+      player.device = metadata.device;
+    }
     player.socketId = socketId;
     this.touch(room);
     this.recordEvent({
@@ -418,6 +361,26 @@ export class RoomManager {
         type: "player_disconnected",
       });
     }
+  }
+
+  updatePlayerPing(
+    roomCode: string,
+    playerId: string,
+    socketId: string,
+    pingMs: number,
+  ): void {
+    const room = this.requireRoom(roomCode);
+    const player = room.players.get(playerId);
+
+    if (
+      player === undefined ||
+      !player.connected ||
+      player.socketId !== socketId
+    ) {
+      throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
+    }
+
+    player.pingMs = pingMs;
   }
 
   removePlayer(roomCode: string, playerId: string): boolean {
@@ -535,30 +498,61 @@ export class RoomManager {
       );
     }
 
-    if (buzzer.winnerPlayerId !== null || buzzer.status === "winner") {
-      throw new RoomError("BUZZ_ALREADY_WON", "Первый игрок уже определён");
-    }
-
     if (buzzer.status !== "open") {
       throw new RoomError("BUZZER_CLOSED", "Кнопки сейчас закрыты");
     }
 
     buzzer.pressedPlayerIds.add(player.id);
-    buzzer.winnerPlayerId = player.id;
-    buzzer.status = "winner";
-    if (room.session?.getPhase() === "buzzing") {
-      room.session.beginAnswer(player.id);
-    }
     this.touch(room);
     this.recordEvent({
       details: {
         playerId: player.id,
         playerName: player.name,
+        position: buzzer.pressedPlayerIds.size,
         windowId: buzzWindowId,
       },
       roomCode,
-      type: "buzzer_winner",
+      type: "buzzer_pressed",
     });
+  }
+
+  selectAnsweringPlayer(
+    roomCode: string,
+    hostToken: string,
+    playerId: string,
+  ): TimerState {
+    const room = this.requireHost(roomCode, hostToken);
+    const session = this.requireSession(room);
+    const buzzer = room.buzzer;
+    const player = room.players.get(playerId);
+
+    if (
+      buzzer === null ||
+      player === undefined ||
+      !buzzer.pressedPlayerIds.has(playerId)
+    ) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Можно выбрать только игрока, который нажал кнопку",
+      );
+    }
+
+    const timer = session.beginAnswer(playerId);
+    buzzer.winnerPlayerId = playerId;
+    buzzer.status = "winner";
+    buzzer.closeReason = "manual";
+    this.touch(room);
+    this.recordEvent({
+      details: {
+        playerId,
+        playerName: player.name,
+        position: [...buzzer.pressedPlayerIds].indexOf(playerId) + 1,
+        windowId: buzzer.id,
+      },
+      roomCode,
+      type: "answer_selected",
+    });
+    return timer;
   }
 
   startSession(roomCode: string, hostToken: string): void {
@@ -581,6 +575,34 @@ export class RoomManager {
     });
   }
 
+  changeRound(roomCode: string, hostToken: string, roundIndex: number): void {
+    const room = this.requireHost(roomCode, hostToken);
+    this.requireSession(room).changeRound(roundIndex);
+    room.buzzer = null;
+    this.touch(room);
+    this.recordEvent({
+      details: { roundIndex },
+      roomCode,
+      type: "round_changed",
+    });
+  }
+
+  startThemeExplanation(
+    roomCode: string,
+    hostToken: string,
+    themeId: string,
+  ): void {
+    const room = this.requireHost(roomCode, hostToken);
+    this.requireSession(room).startThemeExplanation(themeId);
+    room.buzzer = null;
+    this.touch(room);
+    this.recordEvent({
+      details: { themeId },
+      roomCode,
+      type: "theme_explanation_started",
+    });
+  }
+
   selectQuestion(
     roomCode: string,
     hostToken: string,
@@ -596,6 +618,20 @@ export class RoomManager {
       type: "question_selected",
     });
     return timer;
+  }
+
+  restartMedia(roomCode: string, hostToken: string): void {
+    const room = this.requireHost(roomCode, hostToken);
+    this.requireSession(room).restartMedia();
+    this.touch(room);
+    this.recordEvent({ roomCode, type: "media_restarted" });
+  }
+
+  stopMedia(roomCode: string, hostToken: string): void {
+    const room = this.requireHost(roomCode, hostToken);
+    this.requireSession(room).stopMedia();
+    this.touch(room);
+    this.recordEvent({ roomCode, type: "media_stopped" });
   }
 
   completeQuestionIntro(roomCode: string): OpenedBuzzer {
@@ -634,8 +670,38 @@ export class RoomManager {
 
   cancelScoreProposal(roomCode: string, hostToken: string): void {
     const room = this.requireHost(roomCode, hostToken);
-    this.requireSession(room).cancelScoreProposal();
+    const session = this.requireSession(room);
+    const outcome = session.cancelScoreProposal();
+
+    if (outcome === "buzzing") {
+      const durationMs =
+        (room.quizSnapshot?.settings.buzzSeconds ?? 10) * 1_000;
+      const opened = this.reopenBuzzerRecord(room, durationMs);
+      session.setBuzzTimer(opened.timer);
+    }
     this.touch(room);
+  }
+
+  proposeNoAnswerPenalty(roomCode: string, hostToken: string): void {
+    const room = this.requireHost(roomCode, hostToken);
+    const proposal = this.requireSession(room).createNoAnswerProposal(
+      room.players,
+    );
+    if (room.buzzer !== null) {
+      room.buzzer.closeReason = "manual";
+      room.buzzer.status = "closed";
+      room.buzzer.winnerPlayerId = null;
+    }
+    this.touch(room);
+    this.recordEvent({
+      details: {
+        playerCount: proposal.playerIds.length,
+        questionId: proposal.questionId,
+        suggestedDelta: proposal.suggestedDelta,
+      },
+      roomCode,
+      type: "no_answer_penalty_proposed",
+    });
   }
 
   confirmScore(
@@ -652,7 +718,7 @@ export class RoomManager {
     if (outcome === "buzzing") {
       const durationMs =
         (room.quizSnapshot?.settings.buzzSeconds ?? 10) * 1_000;
-      const opened = this.openBuzzerRecord(room, durationMs);
+      const opened = this.reopenBuzzerRecord(room, durationMs);
       session.setBuzzTimer(opened.timer);
     } else {
       room.buzzer = null;
@@ -663,13 +729,155 @@ export class RoomManager {
       details: {
         delta,
         outcome,
-        playerId: proposal?.playerId ?? null,
+        playerCount:
+          proposal?.target === "all-players"
+            ? proposal.playerIds.length
+            : proposal === null
+              ? 0
+              : 1,
+        playerId: proposal?.target === "player" ? proposal.playerId : null,
         proposalId,
+        target: proposal?.target ?? null,
       },
       roomCode,
       type: "score_confirmed",
     });
     return outcome;
+  }
+
+  adjustPlayerScore(
+    roomCode: string,
+    hostToken: string,
+    playerId: string,
+    delta: number,
+  ): void {
+    const room = this.requireHost(roomCode, hostToken);
+    const phase = room.session?.getPhase();
+
+    if (
+      phase !== undefined &&
+      phase !== "board" &&
+      phase !== "round-finished" &&
+      phase !== "game-finished"
+    ) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Баллы можно корректировать только вне вопроса",
+      );
+    }
+
+    const player = room.players.get(playerId);
+    if (player === undefined) {
+      throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
+    }
+
+    player.score += delta;
+    this.touch(room);
+    this.recordEvent({
+      details: {
+        delta,
+        playerId: player.id,
+        playerName: player.name,
+      },
+      roomCode,
+      type: "score_adjusted",
+    });
+  }
+
+  updatePlayer(
+    roomCode: string,
+    hostToken: string,
+    playerId: string,
+    name: string,
+    delta: number,
+  ): void {
+    const room = this.requireHost(roomCode, hostToken);
+    const phase = room.session?.getPhase();
+
+    if (
+      phase !== undefined &&
+      phase !== "board" &&
+      phase !== "round-finished" &&
+      phase !== "game-finished"
+    ) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Игрока можно изменять только вне вопроса",
+      );
+    }
+
+    const player = room.players.get(playerId);
+    if (player === undefined) {
+      throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
+    }
+
+    const playerName = parsePlayerName(name);
+    const normalizedName = playerName.toLocaleLowerCase("ru-RU");
+    const nameIsTaken = [...room.players.values()].some(
+      (candidate) =>
+        candidate.id !== playerId &&
+        candidate.name.toLocaleLowerCase("ru-RU") === normalizedName,
+    );
+    if (nameIsTaken) {
+      throw new RoomError("NAME_TAKEN", "Игрок с таким именем уже подключён");
+    }
+
+    const previousName = player.name;
+    player.name = playerName;
+    player.score += delta;
+    this.touch(room);
+    this.recordEvent({
+      details: {
+        delta,
+        playerId: player.id,
+        playerName,
+        previousName,
+      },
+      roomCode,
+      type: "player_updated",
+    });
+  }
+
+  skipTimer(roomCode: string, hostToken: string): OpenedBuzzer | null {
+    const room = this.requireHost(roomCode, hostToken);
+    const session = this.requireSession(room);
+    const phase = session.getPhase();
+    let opened: OpenedBuzzer | null = null;
+
+    if (phase === "theme-explanation") {
+      session.finishThemeExplanation();
+      room.buzzer = null;
+      this.touch(room);
+    } else if (phase === "question-intro") {
+      opened = this.completeQuestionIntro(roomCode);
+    } else if (phase === "buzzing") {
+      if (room.buzzer === null || room.buzzer.status !== "open") {
+        throw new RoomError(
+          "SESSION_INVALID_PHASE",
+          "Активного таймера нажатий нет",
+        );
+      }
+      room.buzzer.status = "closed";
+      room.buzzer.closeReason = "expired";
+      session.expireBuzzTimer();
+      this.touch(room);
+    } else if (phase === "answering") {
+      this.judgeAnswer(roomCode, hostToken, "timeout");
+    } else if (phase === "answer-reveal") {
+      this.finishQuestion(roomCode);
+    } else {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "В текущей фазе нет таймера для пропуска",
+      );
+    }
+
+    this.recordEvent({
+      details: { phase },
+      roomCode,
+      type: "timer_skipped",
+    });
+    return opened;
   }
 
   revealAnswer(roomCode: string, hostToken: string): TimerState {
@@ -708,6 +916,12 @@ export class RoomManager {
   getHostState(roomCode: string): HostRoomState {
     const room = this.requireRoom(roomCode);
     const buzzer = room.buzzer;
+    const buzzPositions = new Map(
+      [...(buzzer?.pressedPlayerIds ?? [])].map((playerId, index) => [
+        playerId,
+        index + 1,
+      ]),
+    );
     const winner =
       buzzer?.winnerPlayerId === null || buzzer?.winnerPlayerId === undefined
         ? null
@@ -734,7 +948,13 @@ export class RoomManager {
       connectedDisplayCount: room.displaySocketIds.size,
       game: room.session?.getState() ?? null,
       players: [...room.players.values()]
-        .map(toPublicPlayer)
+        .map((player): HostPlayer => ({
+          ...toPublicPlayer(player),
+          buzzPosition: buzzPositions.get(player.id) ?? null,
+          device: player.device,
+          joinedAt: player.joinedAt,
+          pingMs: player.pingMs,
+        }))
         .sort((left, right) =>
           room.session?.getPhase() === "game-finished"
             ? right.score - left.score || left.name.localeCompare(right.name)
@@ -754,7 +974,12 @@ export class RoomManager {
     }
 
     return {
+      answerDelta: room.session?.getAnswerDelta(playerId) ?? null,
       buzzer: {
+        position:
+          room.buzzer === null
+            ? null
+            : [...room.buzzer.pressedPlayerIds].indexOf(playerId) + 1 || null,
         status: this.getPlayerBuzzerStatus(room, playerId),
         timer: room.buzzer?.status === "open" ? room.buzzer.timer : null,
         windowId: room.buzzer?.id ?? null,
@@ -772,26 +997,10 @@ export class RoomManager {
   getDisplayState(roomCode: string): DisplayRoomState {
     const room = this.requireRoom(roomCode);
     const players = [...room.players.values()];
-    const showScores =
-      room.session?.getPhase() === "game-finished" ||
-      room.quizSnapshot?.settings.showScoresToPlayers !== false;
 
     return {
       connectedPlayerCount: players.filter((player) => player.connected).length,
       game: room.session?.getDisplayState(room.players) ?? null,
-      players: players
-        .map((player) => ({
-          name: player.name,
-          score: showScores ? player.score : null,
-        }))
-        .sort((left, right) => {
-          if (left.score === null || right.score === null) {
-            return left.name.localeCompare(right.name);
-          }
-          return (
-            right.score - left.score || left.name.localeCompare(right.name)
-          );
-        }),
       quizTitle: room.quizSnapshot?.title ?? null,
       roomCode: room.code,
     };
@@ -833,138 +1042,7 @@ export class RoomManager {
       }
     }
 
-    if (deletedRoomCodes.length > 0) {
-      this.notifyChange();
-    }
-
     return deletedRoomCodes;
-  }
-
-  private toSnapshot(room: RoomRecord): RoomSnapshot {
-    return {
-      buzzer:
-        room.buzzer === null
-          ? null
-          : {
-              closeReason: room.buzzer.closeReason,
-              id: room.buzzer.id,
-              pressedPlayerIds: [...room.buzzer.pressedPlayerIds],
-              status: room.buzzer.status,
-              timer: { ...room.buzzer.timer },
-              winnerPlayerId: room.buzzer.winnerPlayerId,
-            },
-      code: room.code,
-      createdAt: room.createdAt,
-      hostTokenHash: room.hostTokenHash,
-      lastActivityAt: room.lastActivityAt,
-      players: [...room.players.values()].map((player) => ({
-        id: player.id,
-        name: player.name,
-        score: player.score,
-        tokenHash: player.tokenHash,
-      })),
-      quizSnapshot:
-        room.quizSnapshot === null ? null : structuredClone(room.quizSnapshot),
-      session: room.session?.toSnapshot() ?? null,
-    };
-  }
-
-  private fromSnapshot(snapshot: RoomSnapshot): RoomRecord {
-    if (snapshot.session !== null && snapshot.quizSnapshot === null) {
-      throw new RoomError(
-        "QUIZ_NOT_FOUND",
-        "Snapshot сессии не содержит викторину",
-      );
-    }
-
-    const players = new Map<string, PlayerRecord>();
-    for (const player of snapshot.players) {
-      if (players.has(player.id)) {
-        throw new RoomError(
-          "PLAYER_UNAUTHORIZED",
-          "Snapshot содержит повторяющийся идентификатор игрока",
-        );
-      }
-      players.set(player.id, {
-        connected: false,
-        id: player.id,
-        name: player.name,
-        score: player.score,
-        socketId: null,
-        tokenHash: player.tokenHash,
-      });
-    }
-
-    const referencedPlayerIds = new Set<string>();
-    if (snapshot.buzzer !== null) {
-      for (const playerId of snapshot.buzzer.pressedPlayerIds) {
-        referencedPlayerIds.add(playerId);
-      }
-      if (snapshot.buzzer.winnerPlayerId !== null) {
-        referencedPlayerIds.add(snapshot.buzzer.winnerPlayerId);
-      }
-    }
-    const activeQuestion = snapshot.session?.activeQuestion;
-    if (activeQuestion !== null && activeQuestion !== undefined) {
-      for (const playerId of activeQuestion.attemptedPlayerIds) {
-        referencedPlayerIds.add(playerId);
-      }
-      if (activeQuestion.currentPlayerId !== null) {
-        referencedPlayerIds.add(activeQuestion.currentPlayerId);
-      }
-    }
-    const scoreProposal = snapshot.session?.scoreProposal;
-    if (scoreProposal !== null && scoreProposal !== undefined) {
-      referencedPlayerIds.add(scoreProposal.playerId);
-    }
-    for (const operation of snapshot.session?.scoreOperations ?? []) {
-      referencedPlayerIds.add(operation.playerId);
-    }
-    for (const playerId of referencedPlayerIds) {
-      if (!players.has(playerId)) {
-        throw new RoomError(
-          "PLAYER_UNAUTHORIZED",
-          "Snapshot ссылается на неизвестного игрока",
-        );
-      }
-    }
-
-    const quizSnapshot =
-      snapshot.quizSnapshot === null
-        ? null
-        : structuredClone(snapshot.quizSnapshot);
-    const session =
-      snapshot.session === null || quizSnapshot === null
-        ? null
-        : GameSession.fromSnapshot(
-            quizSnapshot,
-            snapshot.session,
-            this.now,
-            this.idGenerator,
-          );
-
-    return {
-      buzzer:
-        snapshot.buzzer === null
-          ? null
-          : {
-              closeReason: snapshot.buzzer.closeReason,
-              id: snapshot.buzzer.id,
-              pressedPlayerIds: new Set(snapshot.buzzer.pressedPlayerIds),
-              status: snapshot.buzzer.status,
-              timer: { ...snapshot.buzzer.timer },
-              winnerPlayerId: snapshot.buzzer.winnerPlayerId,
-            },
-      code: snapshot.code,
-      createdAt: snapshot.createdAt,
-      displaySocketIds: new Set(),
-      hostSocketId: null,
-      hostTokenHash: snapshot.hostTokenHash,
-      lastActivityAt: this.now(),
-      players,
-      quizSnapshot,
-      session,
-    };
   }
 
   private requireHost(roomCode: string, hostToken: string): RoomRecord {
@@ -1000,13 +1078,28 @@ export class RoomManager {
     playerId: string,
   ): PlayerBuzzerStatus {
     const { buzzer } = room;
+    const session = room.session;
 
-    if (room.session?.getAttemptedPlayerIds().has(playerId)) {
+    if (session?.getCorrectPlayerId() === playerId) {
+      return "correct";
+    }
+
+    if (session?.getAttemptedPlayerIds().has(playerId)) {
       return "answered-incorrectly";
     }
 
     if (buzzer === null) {
       return "waiting";
+    }
+
+    if (buzzer.status === "winner") {
+      return buzzer.winnerPlayerId === playerId
+        ? "winner"
+        : "other-player-answering";
+    }
+
+    if (buzzer.pressedPlayerIds.has(playerId)) {
+      return "queued";
     }
 
     if (buzzer.closeReason === "expired") {
@@ -1017,24 +1110,11 @@ export class RoomManager {
       return "ready";
     }
 
-    if (buzzer.status === "winner") {
-      return buzzer.winnerPlayerId === playerId
-        ? "winner"
-        : "other-player-answering";
-    }
-
     return "waiting";
   }
 
   private touch(room: RoomRecord): void {
     room.lastActivityAt = this.now();
-    this.notifyChange();
-  }
-
-  private notifyChange(): void {
-    for (const listener of this.changeListeners) {
-      listener();
-    }
   }
 
   private recordEvent(event: SessionEventInput): void {
@@ -1079,6 +1159,39 @@ export class RoomManager {
     });
     return {
       buzzWindowId: buzzer.id,
+      timer,
+    };
+  }
+
+  private reopenBuzzerRecord(
+    room: RoomRecord,
+    durationMs: number,
+  ): OpenedBuzzer {
+    if (room.buzzer === null) {
+      return this.openBuzzerRecord(room, durationMs);
+    }
+
+    const startedAt = this.now();
+    const timer: TimerState = {
+      durationMs,
+      endsAt: startedAt + durationMs,
+      startedAt,
+    };
+    room.buzzer.closeReason = null;
+    room.buzzer.status = "open";
+    room.buzzer.timer = timer;
+    room.buzzer.winnerPlayerId = null;
+    this.recordEvent({
+      details: {
+        durationMs,
+        preservedPressCount: room.buzzer.pressedPlayerIds.size,
+        windowId: room.buzzer.id,
+      },
+      roomCode: room.code,
+      type: "buzzer_opened",
+    });
+    return {
+      buzzWindowId: room.buzzer.id,
       timer,
     };
   }

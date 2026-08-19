@@ -55,6 +55,17 @@ describe("quizConfigSchema", () => {
     expect(quizConfigSchema.safeParse(createValidQuiz()).success).toBe(true);
   });
 
+  it("сохраняет необязательное пояснение темы", () => {
+    const quiz = createValidQuiz();
+    quiz.rounds[0]!.themes[0]!.description =
+      "В этой теме нужно назвать фильм по описанию.";
+
+    const parsed = quizConfigSchema.parse(quiz);
+    expect(parsed.rounds[0]?.themes[0]?.description).toBe(
+      "В этой теме нужно назвать фильм по описанию.",
+    );
+  });
+
   it("отклоняет неизвестную версию схемы", () => {
     const quiz = {
       ...createValidQuiz(),
@@ -107,6 +118,58 @@ describe("quizConfigSchema", () => {
     expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
   });
 
+  it("поддерживает текстовый аудиовопрос с обрезкой", () => {
+    const quiz = createValidQuiz();
+    getFirstQuestion(quiz).content.media = {
+      durationMs: 10_000,
+      kind: "audio",
+      mimeType: "audio/webm",
+      path: "assets/kino-2026/media/question.webm",
+      trimEndMs: 8_000,
+      trimStartMs: 1_000,
+      waveform: Array.from({ length: 120 }, (_, index) => (index % 10) / 10),
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
+  });
+
+  it("запрещает одновременно изображение и аудио", () => {
+    const quiz = createValidQuiz();
+    const question = getFirstQuestion(quiz);
+    question.content.image = {
+      path: "assets/kino-2026/images/frame.webp",
+    };
+    question.content.media = {
+      durationMs: 10_000,
+      kind: "video",
+      mimeType: "video/mp4",
+      path: "assets/kino-2026/media/question.mp4",
+      trimEndMs: 10_000,
+      trimStartMs: 0,
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+  });
+
+  it("поддерживает правильный ответ только с изображением", () => {
+    const quiz = createValidQuiz();
+    const question = getFirstQuestion(quiz);
+    question.answer = "";
+    question.answerImage = {
+      alt: "Кадр с ответом",
+      path: "assets/kino-2026/images/answer.webp",
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
+  });
+
+  it("отклоняет пустой правильный ответ без изображения", () => {
+    const quiz = createValidQuiz();
+    getFirstQuestion(quiz).answer = "";
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+  });
+
   it("отклоняет путь изображения другого slug", () => {
     const quiz = createValidQuiz();
     getFirstQuestion(quiz).content.image = {
@@ -116,7 +179,16 @@ describe("quizConfigSchema", () => {
     expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
   });
 
-  it("запрещает одинаковую стоимость вопросов внутри темы", () => {
+  it("отклоняет путь изображения ответа другого slug", () => {
+    const quiz = createValidQuiz();
+    getFirstQuestion(quiz).answerImage = {
+      path: "assets/other-quiz/images/answer.webp",
+    };
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+  });
+
+  it("разрешает одинаковую стоимость вопросов внутри темы", () => {
     const quiz = createValidQuiz();
     const questions = quiz.rounds[0]?.themes[0]?.questions;
 
@@ -133,7 +205,7 @@ describe("quizConfigSchema", () => {
       price: 100,
     });
 
-    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
   });
 
   it("разрешает одинаковую стоимость в разных темах", () => {

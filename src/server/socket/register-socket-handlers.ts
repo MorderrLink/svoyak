@@ -2,6 +2,7 @@ import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { getQuizRepository } from "@/server/quiz/quiz-repository-instance";
 import { RoomError } from "@/server/room/room-error";
 import type { RoomManager } from "@/server/room/room-manager";
+import { describeDevice } from "@/server/socket/describe-device";
 import { SocketSecurity } from "@/server/socket/socket-security";
 import type {
   ClientToServerEvents,
@@ -12,9 +13,12 @@ import type {
   SocketResult,
 } from "@/shared/contracts/socket";
 import {
+  adjustPlayerScorePayloadSchema,
+  changeRoundPayloadSchema,
   checkRoomPayloadSchema,
   confirmScorePayloadSchema,
   createRoomPayloadSchema,
+  emptyPayloadSchema,
   hostCommandPayloadSchema,
   judgeAnswerPayloadSchema,
   joinRoomPayloadSchema,
@@ -22,7 +26,12 @@ import {
   pressBuzzerPayloadSchema,
   reconnectHostPayloadSchema,
   reconnectPlayerPayloadSchema,
+  selectAnsweringPlayerPayloadSchema,
   selectQuestionPayloadSchema,
+  selectThemePayloadSchema,
+  updatePlayerPayloadSchema,
+  updatePlayerTelemetryPayloadSchema,
+  userAgentHeaderSchema,
 } from "@/shared/schemas/socket";
 
 import type { Server, Socket } from "socket.io";
@@ -202,6 +211,27 @@ function emitRoomState(
       );
     }
   }
+}
+
+function emitHostState(
+  io: ApplicationSocketServer,
+  roomManager: RoomManager,
+  roomCode: string,
+): void {
+  const room = roomManager.getRoom(roomCode);
+  if (room?.hostSocketId !== null && room?.hostSocketId !== undefined) {
+    io.to(room.hostSocketId).emit(
+      "host:state",
+      roomManager.getHostState(roomCode),
+    );
+  }
+}
+
+function getSocketDevice(socket: ApplicationSocket): string {
+  const parsed = userAgentHeaderSchema.safeParse(
+    socket.handshake.headers["user-agent"],
+  );
+  return describeDevice(parsed.success ? parsed.data : undefined);
 }
 
 function disconnectPreviousSocket(
@@ -420,6 +450,7 @@ export function registerSocketHandlers(
           parsed.data.roomCode,
           parsed.data.name,
           socket.id,
+          { device: getSocketDevice(socket) },
         );
         socket.data = {
           playerId: added.playerId,
@@ -451,6 +482,7 @@ export function registerSocketHandlers(
           parsed.data.roomCode,
           parsed.data.playerToken,
           socket.id,
+          { device: getSocketDevice(socket) },
         );
         socket.data = {
           playerId: reconnected.playerId,
@@ -463,6 +495,63 @@ export function registerSocketHandlers(
           roomCode: parsed.data.roomCode,
         });
         emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("player:ping", (payload, callback) => {
+      const parsed = parsePayload(emptyPayloadSchema, payload);
+      const { playerId, role, roomCode } = socket.data;
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      if (
+        role !== "player" ||
+        roomCode === undefined ||
+        playerId === undefined
+      ) {
+        respondWithError(socket, callback, {
+          code: "PLAYER_UNAUTHORIZED",
+          message: "Игрок не авторизован",
+        });
+        return;
+      }
+
+      respondWithSuccess(socket, callback, { respondedAt: Date.now() });
+    });
+
+    socket.on("player:telemetry", (payload, callback) => {
+      const parsed = parsePayload(updatePlayerTelemetryPayloadSchema, payload);
+      const { playerId, role, roomCode } = socket.data;
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      if (
+        role !== "player" ||
+        roomCode === undefined ||
+        playerId === undefined
+      ) {
+        respondWithError(socket, callback, {
+          code: "PLAYER_UNAUTHORIZED",
+          message: "Игрок не авторизован",
+        });
+        return;
+      }
+
+      try {
+        roomManager.updatePlayerPing(
+          roomCode,
+          playerId,
+          socket.id,
+          parsed.data.pingMs,
+        );
+        respondWithSuccess(socket, callback, { completed: true });
+        emitHostState(io, roomManager, roomCode);
       } catch (error: unknown) {
         respondWithError(socket, callback, toSocketError(error));
       }
@@ -563,7 +652,6 @@ export function registerSocketHandlers(
           parsed.data.playerToken,
           parsed.data.buzzWindowId,
         );
-        clearExpirationTimer(parsed.data.roomCode);
         respondWithSuccess(socket, callback, { accepted: true });
         emitRoomState(io, roomManager, parsed.data.roomCode);
       } catch (error: unknown) {
@@ -623,6 +711,80 @@ export function registerSocketHandlers(
       }
     });
 
+    socket.on("theme:explain", (payload, callback) => {
+      const parsed = parsePayload(selectThemePayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.startThemeExplanation(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.themeId,
+        );
+        clearExpirationTimer(parsed.data.roomCode);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("media:restart", (payload, callback) => {
+      const parsed = parsePayload(hostCommandPayloadSchema, payload);
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      try {
+        roomManager.restartMedia(parsed.data.roomCode, parsed.data.hostToken);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("media:stop", (payload, callback) => {
+      const parsed = parsePayload(hostCommandPayloadSchema, payload);
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      try {
+        roomManager.stopMedia(parsed.data.roomCode, parsed.data.hostToken);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("round:change", (payload, callback) => {
+      const parsed = parsePayload(changeRoundPayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.changeRound(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.roundIndex,
+        );
+        clearExpirationTimer(parsed.data.roomCode);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
     socket.on("answer:judge", (payload, callback) => {
       const parsed = parsePayload(judgeAnswerPayloadSchema, payload);
 
@@ -644,6 +806,28 @@ export function registerSocketHandlers(
       }
     });
 
+    socket.on("answer:select", (payload, callback) => {
+      const parsed = parsePayload(selectAnsweringPlayerPayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.selectAnsweringPlayer(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.playerId,
+        );
+        clearExpirationTimer(parsed.data.roomCode);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
     socket.on("score:cancel", (payload, callback) => {
       const parsed = parsePayload(hostCommandPayloadSchema, payload);
 
@@ -656,6 +840,59 @@ export function registerSocketHandlers(
         roomManager.cancelScoreProposal(
           parsed.data.roomCode,
           parsed.data.hostToken,
+        );
+        const room = roomManager.requireRoom(parsed.data.roomCode);
+        if (room.buzzer?.status === "open") {
+          scheduleExpiration(
+            parsed.data.roomCode,
+            room.buzzer.id,
+            Math.max(0, room.buzzer.timer.endsAt - Date.now()),
+          );
+        }
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("score:adjust", (payload, callback) => {
+      const parsed = parsePayload(adjustPlayerScorePayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.adjustPlayerScore(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.playerId,
+          parsed.data.delta,
+        );
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("player:update", (payload, callback) => {
+      const parsed = parsePayload(updatePlayerPayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        roomManager.updatePlayer(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.playerId,
+          parsed.data.name,
+          parsed.data.delta,
         );
         respondWithSuccess(socket, callback, { completed: true });
         emitRoomState(io, roomManager, parsed.data.roomCode);
@@ -711,15 +948,39 @@ export function registerSocketHandlers(
       }
 
       try {
-        const timer = roomManager.revealAnswer(
+        roomManager.proposeNoAnswerPenalty(
           parsed.data.roomCode,
           parsed.data.hostToken,
         );
-        scheduleGameTransition(
+        clearExpirationTimer(parsed.data.roomCode);
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("timer:skip", (payload, callback) => {
+      const parsed = parsePayload(hostCommandPayloadSchema, payload);
+
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+
+      try {
+        const opened = roomManager.skipTimer(
           parsed.data.roomCode,
-          "answer-reveal",
-          timer.endsAt,
+          parsed.data.hostToken,
         );
+        clearExpirationTimer(parsed.data.roomCode);
+        if (opened !== null) {
+          scheduleExpiration(
+            parsed.data.roomCode,
+            opened.buzzWindowId,
+            Math.max(0, opened.timer.endsAt - Date.now()),
+          );
+        }
         respondWithSuccess(socket, callback, { completed: true });
         emitRoomState(io, roomManager, parsed.data.roomCode);
       } catch (error: unknown) {

@@ -6,7 +6,7 @@ export function createDefaultQuizSettings(): QuizSettings {
     answerRevealSeconds: 5,
     answerSeconds: 15,
     buzzSeconds: 10,
-    questionIntroSeconds: 2.5,
+    questionIntroSeconds: 1.75,
     showScoresToPlayers: true,
   };
 }

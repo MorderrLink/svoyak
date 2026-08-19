@@ -7,6 +7,7 @@ import { Button } from "@/components/button";
 export interface DialogProps {
   actions?: ReactNode;
   children: ReactNode;
+  closable?: boolean;
   onClose: () => void;
   open: boolean;
   title: string;
@@ -15,12 +16,13 @@ export interface DialogProps {
 export function Dialog({
   actions,
   children,
+  closable = true,
   onClose,
   open,
   title,
 }: DialogProps) {
   useEffect(() => {
-    if (!open) {
+    if (!open || !closable) {
       return;
     }
 
@@ -34,7 +36,7 @@ export function Dialog({
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose, open]);
+  }, [closable, onClose, open]);
 
   if (!open) {
     return null;
@@ -55,14 +57,16 @@ export function Dialog({
           >
             {title}
           </h2>
-          <Button
-            aria-label="Закрыть диалог"
-            className="min-h-9 px-3"
-            onClick={onClose}
-            variant="secondary"
-          >
-            ×
-          </Button>
+          {closable ? (
+            <Button
+              aria-label="Закрыть диалог"
+              className="min-h-9 px-3"
+              onClick={onClose}
+              variant="secondary"
+            >
+              ×
+            </Button>
+          ) : null}
         </header>
         <div className="min-h-0 overflow-y-auto p-4">{children}</div>
         {actions === undefined ? null : (

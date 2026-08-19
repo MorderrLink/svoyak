@@ -4,7 +4,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["localhost", "127.0.0.1", ...getLocalIPv4Addresses()],
-  serverExternalPackages: ["unzipper"],
+  serverExternalPackages: ["ffmpeg-static", "ffprobe-static", "unzipper"],
 };
 
 export default nextConfig;

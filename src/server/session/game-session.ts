@@ -1,25 +1,27 @@
 import { RoomError } from "@/server/room/room-error";
 import type { PlayerRecord } from "@/server/room/types";
 import type {
-  GameSessionSnapshot,
-  ScoreOperationSnapshot,
-} from "@/server/session/session-snapshot";
-import type {
+  AllPlayersScoreChangeProposal,
   AnswerJudgement,
   DisplayGameState,
   GameBoardTheme,
   GamePhase,
   HostActiveQuestion,
   HostGameState,
+  MediaPlaybackState,
+  PlayerScoreChangeProposal,
   ScoreChangeProposal,
+  ThemeExplanation,
   TimerState,
 } from "@/shared/contracts/socket";
 import type { QuizConfig, QuizQuestion, QuizTheme } from "@/shared/types/quiz";
 
 interface ActiveQuestionRecord {
   attemptedPlayerIds: Set<string>;
+  correctPlayerId: string | null;
   currentPlayerId: string | null;
   questionId: string;
+  scoreDeltas: Map<string, number>;
 }
 
 interface LocatedQuestion {
@@ -28,14 +30,16 @@ interface LocatedQuestion {
 }
 
 export type ScoreConfirmationOutcome = "answer-reveal" | "buzzing";
+export type ScoreCancellationOutcome = "answering" | "buzzing";
 
 export class GameSession {
   private activeQuestion: ActiveQuestionRecord | null = null;
+  private activeThemeId: string | null = null;
   private currentRoundIndex = 0;
   private phase: GamePhase = "board";
   private readonly playedQuestionIds = new Set<string>();
+  private mediaPlayback: MediaPlaybackState | null = null;
   private readonly quiz: QuizConfig;
-  private readonly scoreOperations: ScoreOperationSnapshot[] = [];
   private scoreProposal: ScoreChangeProposal | null = null;
   private timer: TimerState | null = null;
 
@@ -45,60 +49,6 @@ export class GameSession {
     private readonly idGenerator: () => string,
   ) {
     this.quiz = structuredClone(quizSnapshot);
-  }
-
-  static fromSnapshot(
-    quizSnapshot: QuizConfig,
-    snapshot: GameSessionSnapshot,
-    now: () => number,
-    idGenerator: () => string,
-  ): GameSession {
-    const session = new GameSession(quizSnapshot, now, idGenerator);
-    session.currentRoundIndex = snapshot.currentRoundIndex;
-    session.phase = snapshot.phase;
-    session.activeQuestion =
-      snapshot.activeQuestion === null
-        ? null
-        : {
-            attemptedPlayerIds: new Set(
-              snapshot.activeQuestion.attemptedPlayerIds,
-            ),
-            currentPlayerId: snapshot.activeQuestion.currentPlayerId,
-            questionId: snapshot.activeQuestion.questionId,
-          };
-    for (const questionId of snapshot.playedQuestionIds) {
-      session.playedQuestionIds.add(questionId);
-    }
-    session.scoreOperations.push(
-      ...snapshot.scoreOperations.map((operation) => ({ ...operation })),
-    );
-    session.scoreProposal =
-      snapshot.scoreProposal === null ? null : { ...snapshot.scoreProposal };
-    session.timer = snapshot.timer === null ? null : { ...snapshot.timer };
-    session.validateRestoredState();
-    return session;
-  }
-
-  toSnapshot(): GameSessionSnapshot {
-    return {
-      activeQuestion:
-        this.activeQuestion === null
-          ? null
-          : {
-              attemptedPlayerIds: [...this.activeQuestion.attemptedPlayerIds],
-              currentPlayerId: this.activeQuestion.currentPlayerId,
-              questionId: this.activeQuestion.questionId,
-            },
-      currentRoundIndex: this.currentRoundIndex,
-      phase: this.phase,
-      playedQuestionIds: [...this.playedQuestionIds],
-      scoreOperations: this.scoreOperations.map((operation) => ({
-        ...operation,
-      })),
-      scoreProposal:
-        this.scoreProposal === null ? null : { ...this.scoreProposal },
-      timer: this.timer === null ? null : { ...this.timer },
-    };
   }
 
   getPhase(): GamePhase {
@@ -111,6 +61,51 @@ export class GameSession {
 
   getAttemptedPlayerIds(): Set<string> {
     return new Set(this.activeQuestion?.attemptedPlayerIds ?? []);
+  }
+
+  getCorrectPlayerId(): string | null {
+    return this.phase === "answer-reveal"
+      ? (this.activeQuestion?.correctPlayerId ?? null)
+      : null;
+  }
+
+  getAnswerDelta(playerId: string): number | null {
+    return this.activeQuestion?.scoreDeltas.get(playerId) ?? null;
+  }
+
+  changeRound(roundIndex: number): void {
+    this.requirePhase("board");
+
+    if (roundIndex < 0 || roundIndex >= this.quiz.rounds.length) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Указанный раунд не существует",
+      );
+    }
+
+    this.currentRoundIndex = roundIndex;
+  }
+
+  startThemeExplanation(themeId: string): void {
+    this.requirePhase("board");
+    const theme = this.findThemeInCurrentRound(themeId);
+    if (theme.description === undefined || theme.description.trim() === "") {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Для этой темы не заполнено пояснение",
+      );
+    }
+
+    this.activeThemeId = theme.id;
+    this.phase = "theme-explanation";
+    this.timer = null;
+  }
+
+  finishThemeExplanation(): void {
+    this.requirePhase("theme-explanation");
+    this.activeThemeId = null;
+    this.phase = "board";
+    this.timer = null;
   }
 
   selectQuestion(questionId: string): TimerState {
@@ -126,10 +121,13 @@ export class GameSession {
 
     this.activeQuestion = {
       attemptedPlayerIds: new Set(),
+      correctPlayerId: null,
       currentPlayerId: null,
       questionId: located.question.id,
+      scoreDeltas: new Map(),
     };
     this.scoreProposal = null;
+    this.mediaPlayback = null;
     this.phase = "question-intro";
     this.timer = this.createTimer(
       this.quiz.settings.questionIntroSeconds * 1_000,
@@ -141,6 +139,64 @@ export class GameSession {
     this.requirePhase("question-intro");
     this.phase = "buzzing";
     this.timer = null;
+    const media = this.getHostActiveQuestion()?.media;
+    this.mediaPlayback =
+      media === null || media === undefined
+        ? null
+        : {
+            playing: true,
+            positionMs: media.trimStartMs,
+            revision: this.idGenerator(),
+            startedAt: this.now(),
+          };
+  }
+
+  restartMedia(): void {
+    this.requireMediaPhase();
+    const media = this.getHostActiveQuestion()?.media;
+    if (media === null || media === undefined) {
+      throw new RoomError("SESSION_INVALID_PHASE", "В вопросе нет медиа");
+    }
+    this.mediaPlayback = {
+      playing: true,
+      positionMs: media.trimStartMs,
+      revision: this.idGenerator(),
+      startedAt: this.now(),
+    };
+  }
+
+  stopMedia(): void {
+    this.requireMediaPhase();
+    if (this.mediaPlayback === null) {
+      throw new RoomError("SESSION_INVALID_PHASE", "Вопрос не воспроизводится");
+    }
+    const media = this.getHostActiveQuestion()?.media;
+    if (media === null || media === undefined) {
+      throw new RoomError("SESSION_INVALID_PHASE", "В вопросе нет медиа");
+    }
+    if (!this.mediaPlayback.playing) {
+      this.mediaPlayback = {
+        playing: true,
+        positionMs: this.mediaPlayback.positionMs,
+        revision: this.idGenerator(),
+        startedAt: this.now(),
+      };
+      return;
+    }
+    const elapsedMs =
+      this.mediaPlayback.startedAt === null
+        ? 0
+        : Math.max(0, this.now() - this.mediaPlayback.startedAt);
+    const positionMs = Math.min(
+      media.trimEndMs,
+      this.mediaPlayback.positionMs + elapsedMs,
+    );
+    this.mediaPlayback = {
+      playing: false,
+      positionMs,
+      revision: this.idGenerator(),
+      startedAt: null,
+    };
   }
 
   setBuzzTimer(timer: TimerState): void {
@@ -153,7 +209,7 @@ export class GameSession {
     this.timer = null;
   }
 
-  beginAnswer(playerId: string): void {
+  beginAnswer(playerId: string): TimerState {
     this.requirePhase("buzzing");
     const activeQuestion = this.requireActiveQuestion();
 
@@ -167,12 +223,13 @@ export class GameSession {
     activeQuestion.currentPlayerId = playerId;
     this.phase = "answering";
     this.timer = this.createTimer(this.quiz.settings.answerSeconds * 1_000);
+    return { ...this.timer };
   }
 
   judgeAnswer(
     judgement: AnswerJudgement,
     players: Map<string, PlayerRecord>,
-  ): ScoreChangeProposal {
+  ): PlayerScoreChangeProposal {
     this.requirePhase("answering");
     const activeQuestion = this.requireActiveQuestion();
     const player =
@@ -194,7 +251,7 @@ export class GameSession {
         : judgement === "incorrect" && this.quiz.settings.allowNegativeScore
           ? -question.price
           : 0;
-    const proposal: ScoreChangeProposal = {
+    const proposal: PlayerScoreChangeProposal = {
       editedDelta: suggestedDelta,
       id: this.idGenerator(),
       judgement,
@@ -203,6 +260,7 @@ export class GameSession {
       questionId: question.id,
       questionPrice: question.price,
       suggestedDelta,
+      target: "player",
     };
 
     this.scoreProposal = proposal;
@@ -211,10 +269,49 @@ export class GameSession {
     return { ...proposal };
   }
 
-  cancelScoreProposal(): void {
+  createNoAnswerProposal(
+    players: Map<string, PlayerRecord>,
+  ): AllPlayersScoreChangeProposal {
+    this.requirePhase("buzzing");
+    const activeQuestion = this.requireActiveQuestion();
+    const { question } = this.findQuestion(activeQuestion.questionId);
+    const targets = [...players.values()];
+
+    if (targets.length === 0) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "В комнате нет игроков для списания баллов",
+      );
+    }
+
+    const suggestedDelta = -question.price;
+    const proposal: AllPlayersScoreChangeProposal = {
+      editedDelta: suggestedDelta,
+      id: this.idGenerator(),
+      playerIds: targets.map((player) => player.id),
+      playerNames: targets.map((player) => player.name),
+      questionId: question.id,
+      questionPrice: question.price,
+      suggestedDelta,
+      target: "all-players",
+    };
+
+    this.scoreProposal = proposal;
+    this.phase = "score-confirmation";
+    this.timer = null;
+    return {
+      ...proposal,
+      playerIds: [...proposal.playerIds],
+      playerNames: [...proposal.playerNames],
+    };
+  }
+
+  cancelScoreProposal(): ScoreCancellationOutcome {
     this.requirePhase("score-confirmation");
+    const target = this.scoreProposal?.target;
     this.scoreProposal = null;
-    this.phase = "answering";
+    this.phase = target === "all-players" ? "buzzing" : "answering";
+    return this.phase;
   }
 
   confirmScore(
@@ -240,23 +337,29 @@ export class GameSession {
       );
     }
 
+    if (proposal.target === "all-players") {
+      for (const playerId of proposal.playerIds) {
+        const player = players.get(playerId);
+        if (player !== undefined) {
+          player.score += delta;
+        }
+      }
+      this.scoreProposal = null;
+      this.startAnswerReveal();
+      return "answer-reveal";
+    }
+
     const player = players.get(proposal.playerId);
     if (player === undefined) {
       throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
     }
 
     player.score += delta;
-    this.scoreOperations.push({
-      confirmedAt: this.now(),
-      delta,
-      id: proposal.id,
-      judgement: proposal.judgement,
-      playerId: player.id,
-      questionId: proposal.questionId,
-    });
+    activeQuestion.scoreDeltas.set(player.id, delta);
     this.scoreProposal = null;
 
     if (proposal.judgement === "correct") {
+      activeQuestion.correctPlayerId = player.id;
       this.startAnswerReveal();
       return "answer-reveal";
     }
@@ -301,42 +404,52 @@ export class GameSession {
     this.activeQuestion = null;
     this.scoreProposal = null;
     this.timer = null;
+    this.mediaPlayback = null;
 
-    const currentRound = this.quiz.rounds[this.currentRoundIndex];
-    const roundFinished =
-      currentRound !== undefined &&
-      currentRound.themes.every((theme) =>
-        theme.questions.every((question) =>
-          this.playedQuestionIds.has(question.id),
-        ),
-      );
-
-    if (roundFinished && this.currentRoundIndex + 1 < this.quiz.rounds.length) {
-      this.currentRoundIndex += 1;
-      this.phase = "board";
-    } else if (roundFinished) {
+    if (this.areAllQuestionsPlayed()) {
       this.phase = "game-finished";
-    } else {
-      this.phase = "board";
+      return;
     }
+
+    if (this.isRoundFinished(this.currentRoundIndex)) {
+      const nextRoundIndex = this.findNextRoundWithQuestions();
+      if (nextRoundIndex !== null) {
+        this.currentRoundIndex = nextRoundIndex;
+      }
+    }
+
+    this.phase = "board";
   }
 
   finishSession(): void {
+    this.activeThemeId = null;
     this.phase = "game-finished";
     this.timer = null;
     this.scoreProposal = null;
+    this.mediaPlayback = null;
   }
 
   getState(): HostGameState {
     return {
       activeQuestion: this.getHostActiveQuestion(),
+      activeThemeExplanation: this.getActiveThemeExplanation(),
       board: this.getBoard(),
       currentRoundIndex: this.currentRoundIndex,
+      mediaPlayback:
+        this.mediaPlayback === null ? null : { ...this.mediaPlayback },
       phase: this.phase,
       quizTitle: this.quiz.title,
       roundCount: this.quiz.rounds.length,
       scoreProposal:
-        this.scoreProposal === null ? null : { ...this.scoreProposal },
+        this.scoreProposal === null
+          ? null
+          : this.scoreProposal.target === "all-players"
+            ? {
+                ...this.scoreProposal,
+                playerIds: [...this.scoreProposal.playerIds],
+                playerNames: [...this.scoreProposal.playerNames],
+              }
+            : { ...this.scoreProposal },
       timer: this.timer === null ? null : { ...this.timer },
     };
   }
@@ -344,12 +457,13 @@ export class GameSession {
   getDisplayState(players: Map<string, PlayerRecord>): DisplayGameState {
     const activeQuestion = this.getHostActiveQuestion();
     const showsQuestion =
-      this.phase === "answer-reveal" ||
       this.phase === "answering" ||
       this.phase === "buzzing" ||
       this.phase === "score-confirmation";
     const showsActiveQuestion =
-      showsQuestion || this.phase === "question-intro";
+      showsQuestion ||
+      this.phase === "answer-reveal" ||
+      this.phase === "question-intro";
     const currentPlayer =
       activeQuestion?.currentPlayerId === null ||
       activeQuestion?.currentPlayerId === undefined
@@ -363,6 +477,10 @@ export class GameSession {
           : {
               answer:
                 this.phase === "answer-reveal" ? activeQuestion.answer : null,
+              answerImage:
+                this.phase === "answer-reveal"
+                  ? activeQuestion.answerImage
+                  : null,
               currentPlayerName:
                 this.phase === "answering" ||
                 this.phase === "score-confirmation"
@@ -370,12 +488,16 @@ export class GameSession {
                   : null,
               id: activeQuestion.id,
               image: showsQuestion ? activeQuestion.image : null,
+              media: showsQuestion ? activeQuestion.media : null,
               price: activeQuestion.price,
               text: showsQuestion ? activeQuestion.text : null,
               themeTitle: activeQuestion.themeTitle,
             },
+      activeThemeExplanation: this.getActiveThemeExplanation(),
       board: this.getBoard(),
       currentRoundIndex: this.currentRoundIndex,
+      mediaPlayback:
+        this.mediaPlayback === null ? null : { ...this.mediaPlayback },
       phase: this.phase,
       roundCount: this.quiz.rounds.length,
       timer: this.timer === null ? null : { ...this.timer },
@@ -386,6 +508,7 @@ export class GameSession {
     const activeQuestion = this.requireActiveQuestion();
     this.playedQuestionIds.add(activeQuestion.questionId);
     activeQuestion.currentPlayerId = null;
+    this.mediaPlayback = null;
     this.phase = "answer-reveal";
     this.timer = this.createTimer(
       this.quiz.settings.answerRevealSeconds * 1_000,
@@ -400,6 +523,7 @@ export class GameSession {
     }
 
     return round.themes.map((theme) => ({
+      description: theme.description?.trim() || null,
       id: theme.id,
       questions: theme.questions.map((question) => ({
         id: question.id,
@@ -408,6 +532,24 @@ export class GameSession {
       })),
       title: theme.title,
     }));
+  }
+
+  private getActiveThemeExplanation(): ThemeExplanation | null {
+    if (this.activeThemeId === null) {
+      return null;
+    }
+
+    const theme = this.findThemeInCurrentRound(this.activeThemeId);
+    const description = theme.description?.trim();
+    if (description === undefined || description === "") {
+      return null;
+    }
+
+    return {
+      description,
+      id: theme.id,
+      title: theme.title,
+    };
   }
 
   private getHostActiveQuestion(): HostActiveQuestion | null {
@@ -421,11 +563,13 @@ export class GameSession {
 
     return {
       answer: question.answer,
+      answerImage: question.answerImage ?? null,
       attemptedPlayerIds: [...this.activeQuestion.attemptedPlayerIds],
       currentPlayerId: this.activeQuestion.currentPlayerId,
       hostComment: question.hostComment ?? null,
       id: question.id,
       image: question.content.image ?? null,
+      media: question.content.media ?? null,
       price: question.price,
       text: question.content.text?.trim() || null,
       themeTitle: theme.title,
@@ -455,6 +599,20 @@ export class GameSession {
     );
   }
 
+  private findThemeInCurrentRound(themeId: string): QuizTheme {
+    const theme = this.quiz.rounds[this.currentRoundIndex]?.themes.find(
+      (candidate) => candidate.id === themeId,
+    );
+    if (theme !== undefined) {
+      return theme;
+    }
+
+    throw new RoomError(
+      "SESSION_INVALID_PHASE",
+      "Тема текущего раунда не найдена",
+    );
+  }
+
   private findQuestion(questionId: string): LocatedQuestion {
     for (const round of this.quiz.rounds) {
       for (const theme of round.themes) {
@@ -471,6 +629,35 @@ export class GameSession {
     }
 
     throw new RoomError("SESSION_INVALID_PHASE", "Вопрос не найден");
+  }
+
+  private areAllQuestionsPlayed(): boolean {
+    return this.quiz.rounds.every((_round, roundIndex) =>
+      this.isRoundFinished(roundIndex),
+    );
+  }
+
+  private findNextRoundWithQuestions(): number | null {
+    for (let offset = 1; offset < this.quiz.rounds.length; offset += 1) {
+      const roundIndex =
+        (this.currentRoundIndex + offset) % this.quiz.rounds.length;
+      if (!this.isRoundFinished(roundIndex)) {
+        return roundIndex;
+      }
+    }
+    return null;
+  }
+
+  private isRoundFinished(roundIndex: number): boolean {
+    const round = this.quiz.rounds[roundIndex];
+    return (
+      round !== undefined &&
+      round.themes.every((theme) =>
+        theme.questions.every((question) =>
+          this.playedQuestionIds.has(question.id),
+        ),
+      )
+    );
   }
 
   private createTimer(durationMs: number): TimerState {
@@ -493,6 +680,19 @@ export class GameSession {
     return this.activeQuestion;
   }
 
+  private requireMediaPhase(): void {
+    if (
+      this.phase !== "buzzing" &&
+      this.phase !== "answering" &&
+      this.phase !== "score-confirmation"
+    ) {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Медиа нельзя управлять в текущей фазе",
+      );
+    }
+  }
+
   private requireTimer(): TimerState {
     if (this.timer === null) {
       throw new RoomError("SESSION_INVALID_PHASE", "Таймер отсутствует");
@@ -506,47 +706,6 @@ export class GameSession {
       throw new RoomError(
         "SESSION_INVALID_PHASE",
         `Ожидалась фаза ${expected}, текущая фаза ${this.phase}`,
-      );
-    }
-  }
-
-  private validateRestoredState(): void {
-    if (
-      this.currentRoundIndex >= this.quiz.rounds.length ||
-      this.currentRoundIndex < 0
-    ) {
-      throw new RoomError(
-        "SESSION_INVALID_PHASE",
-        "Snapshot содержит неизвестный раунд",
-      );
-    }
-
-    for (const questionId of this.playedQuestionIds) {
-      this.findQuestion(questionId);
-    }
-
-    const questionPhases = new Set<GamePhase>([
-      "answer-reveal",
-      "answering",
-      "buzzing",
-      "question-intro",
-      "score-confirmation",
-    ]);
-    if (questionPhases.has(this.phase) && this.activeQuestion === null) {
-      throw new RoomError(
-        "SESSION_INVALID_PHASE",
-        "Snapshot активной фазы не содержит вопрос",
-      );
-    }
-
-    if (this.activeQuestion !== null) {
-      this.findQuestion(this.activeQuestion.questionId);
-    }
-
-    if (this.phase === "score-confirmation" && this.scoreProposal === null) {
-      throw new RoomError(
-        "SESSION_INVALID_PHASE",
-        "Snapshot подтверждения не содержит операции баллов",
       );
     }
   }

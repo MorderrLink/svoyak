@@ -8,8 +8,11 @@ import type { QuizConfig } from "@/shared/types/quiz";
 
 export interface PlayerRecord {
   connected: boolean;
+  device: string;
   id: string;
+  joinedAt: number;
   name: string;
+  pingMs: number | null;
   score: number;
   socketId: string | null;
   tokenHash: string;
@@ -27,7 +30,6 @@ export interface BuzzerWindowRecord {
 export interface RoomRecord {
   buzzer: BuzzerWindowRecord | null;
   code: string;
-  createdAt: number;
   displaySocketIds: Set<string>;
   hostSocketId: string | null;
   hostTokenHash: string;

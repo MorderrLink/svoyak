@@ -162,8 +162,12 @@ describe("пакет викторины", () => {
       .png()
       .toBuffer();
     const image = await repository.getAssets().uploadImage(quiz.slug, png);
+    const answerImage = await repository
+      .getAssets()
+      .uploadImage(quiz.slug, png);
     quiz = structuredClone(quiz);
     quiz.rounds[0]!.themes[0]!.questions[0]!.content.image = image;
+    quiz.rounds[0]!.themes[0]!.questions[0]!.answerImage = answerImage;
     await repository.update(quiz.id, quiz);
 
     const exported = await exportQuizPackage(quiz, repository.getAssets());
@@ -171,7 +175,7 @@ describe("пакет викторины", () => {
 
     expect(exported.filename).toBe("media-test.zip");
     expect(validated.quiz.packageIntegrity?.algorithm).toBe("sha256");
-    expect([...validated.assets]).toHaveLength(1);
+    expect([...validated.assets]).toHaveLength(2);
     expect(() =>
       verifyPackageIntegrity(validated.quiz, validated.assets),
     ).not.toThrow();

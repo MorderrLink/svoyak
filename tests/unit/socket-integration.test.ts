@@ -151,6 +151,7 @@ describe("Socket.IO integration", () => {
         ok: true,
       });
       await expect(playerStatePromise).resolves.toMatchObject({
+        buzzer: { position: null },
         name: "Анна",
         phase: "buzzing",
         score: 0,
@@ -178,6 +179,7 @@ describe("Socket.IO integration", () => {
       expect(JSON.stringify(displayState)).not.toContain(
         "Приватный комментарий",
       );
+      expect(displayState).not.toHaveProperty("players");
 
       const unauthorized = await new Promise<SocketResult<CommandResult>>(
         (resolve) => {

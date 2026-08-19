@@ -2,24 +2,33 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export type SessionEventType =
+  | "answer_selected"
   | "answer_judged"
   | "buzzer_opened"
-  | "buzzer_winner"
+  | "buzzer_pressed"
   | "display_connected"
   | "display_disconnected"
   | "host_connected"
   | "host_disconnected"
+  | "media_restarted"
+  | "media_stopped"
+  | "no_answer_penalty_proposed"
   | "player_connected"
   | "player_disconnected"
+  | "player_updated"
   | "question_finished"
   | "question_selected"
+  | "round_changed"
   | "room_created"
   | "room_deleted"
   | "score_confirmed"
+  | "score_adjusted"
   | "security_warning"
   | "session_finished"
   | "session_started"
-  | "socket_error";
+  | "socket_error"
+  | "theme_explanation_started"
+  | "timer_skipped";
 
 export type SessionEventDetails = Record<
   string,

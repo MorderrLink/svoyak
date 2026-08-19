@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 
+import { DEFAULT_IMAGE_ALT_TEXT } from "@/shared/constants/quiz";
 import {
   createQuestion,
   createQuizSlug,
@@ -11,6 +12,7 @@ import {
 import type {
   QuizConfig,
   QuizImage,
+  QuizMedia,
   QuizQuestion,
   QuizSettings,
 } from "@/shared/types/quiz";
@@ -50,7 +52,25 @@ interface QuizEditorState {
     questionId: string,
     image: QuizImage | undefined,
   ) => void;
+  setQuestionMedia: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    media: QuizMedia | undefined,
+  ) => void;
   setQuestionImageAlt: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    alt: string,
+  ) => void;
+  setAnswerImage: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    image: QuizImage | undefined,
+  ) => void;
+  setAnswerImageAlt: (
     roundId: string,
     themeId: string,
     questionId: string,
@@ -67,6 +87,11 @@ interface QuizEditorState {
     >,
   ) => void;
   updateThemeTitle: (roundId: string, themeId: string, title: string) => void;
+  updateThemeDescription: (
+    roundId: string,
+    themeId: string,
+    description: string,
+  ) => void;
 }
 
 function normalizeOrders(quiz: QuizConfig): void {
@@ -261,10 +286,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
         for (const round of draft.rounds) {
           for (const theme of round.themes) {
             for (const question of theme.questions) {
-              const image = question.content.image;
               const prefix = `assets/${oldSlug}/`;
-              if (image?.path.startsWith(prefix) === true) {
-                image.path = `assets/${slug}/${image.path.slice(prefix.length)}`;
+              for (const image of [
+                question.content.image,
+                question.answerImage,
+                question.content.media,
+              ]) {
+                if (image?.path.startsWith(prefix) === true) {
+                  image.path = `assets/${slug}/${image.path.slice(prefix.length)}`;
+                }
               }
             }
           }
@@ -282,6 +312,21 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.questions.find((candidate) => candidate.id === questionId);
         if (question !== undefined) {
           question.content.image = image;
+          if (image !== undefined) question.content.media = undefined;
+        }
+      }),
+    );
+  },
+  setQuestionMedia: (roundId, themeId, questionId, media) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.content.media = media;
+          if (media !== undefined) question.content.image = undefined;
         }
       }),
     );
@@ -295,7 +340,35 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.questions.find((candidate) => candidate.id === questionId)
           ?.content.image;
         if (image !== undefined) {
-          image.alt = alt.trim() === "" ? undefined : alt;
+          image.alt = alt.trim() === "" ? DEFAULT_IMAGE_ALT_TEXT : alt;
+        }
+      }),
+    );
+  },
+  setAnswerImage: (roundId, themeId, questionId, image) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.answerImage = image;
+        }
+      }),
+    );
+  },
+  setAnswerImageAlt: (roundId, themeId, questionId, alt) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const image = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find(
+            (candidate) => candidate.id === questionId,
+          )?.answerImage;
+        if (image !== undefined) {
+          image.alt = alt.trim() === "" ? DEFAULT_IMAGE_ALT_TEXT : alt;
         }
       }),
     );
@@ -311,10 +384,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           for (const round of draft.rounds) {
             for (const theme of round.themes) {
               for (const question of theme.questions) {
-                const image = question.content.image;
                 const prefix = `assets/${oldSlug}/`;
-                if (image?.path.startsWith(prefix) === true) {
-                  image.path = `assets/${newSlug}/${image.path.slice(prefix.length)}`;
+                for (const image of [
+                  question.content.image,
+                  question.answerImage,
+                  question.content.media,
+                ]) {
+                  if (image?.path.startsWith(prefix) === true) {
+                    image.path = `assets/${newSlug}/${image.path.slice(prefix.length)}`;
+                  }
                 }
               }
             }
@@ -360,6 +438,19 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.themes.find((candidate) => candidate.id === themeId);
         if (theme !== undefined) {
           theme.title = title;
+        }
+      }),
+    );
+  },
+  updateThemeDescription: (roundId, themeId, description) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const theme = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((candidate) => candidate.id === themeId);
+        if (theme !== undefined) {
+          theme.description =
+            description.trim() === "" ? undefined : description;
         }
       }),
     );

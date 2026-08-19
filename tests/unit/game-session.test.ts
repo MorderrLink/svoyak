@@ -17,6 +17,8 @@ function createQuiz(): QuizConfig {
         order: 0,
         themes: [
           {
+            description:
+              "Сначала прочитайте правила темы.\nПотом выбирайте вопрос.",
             id: "00000000-0000-4000-8000-000000000003",
             order: 0,
             questions: [
@@ -66,13 +68,13 @@ function createQuiz(): QuizConfig {
   };
 }
 
-function createManager() {
+function createManager(now: () => number = () => 1_000) {
   let generatedId = 0;
   return new RoomManager({
     codeGenerator: () => "A7K4",
     idGenerator: () =>
       `00000000-0000-4000-8000-${String(++generatedId).padStart(12, "0")}`,
-    now: () => 1_000,
+    now,
     tokenGenerator: () =>
       `00000000-0000-4000-8000-${String(++generatedId).padStart(12, "0")}`,
   });
@@ -94,6 +96,98 @@ describe("игровая сессия", () => {
     expect(game?.activeQuestion?.text).toBe("Вопрос 1");
   });
 
+  it("не принимает новых игроков после начала игры", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+
+    expect(() => manager.addPlayer(room.roomCode, "Борис", "socket-2")).toThrow(
+      RoomError,
+    );
+  });
+
+  it("показывает пояснение темы до нажатия ведущим Space", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    manager.startSession(room.roomCode, room.hostToken);
+
+    manager.startThemeExplanation(
+      room.roomCode,
+      room.hostToken,
+      "00000000-0000-4000-8000-000000000003",
+    );
+
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      activeQuestion: null,
+      activeThemeExplanation: {
+        description:
+          "Сначала прочитайте правила темы.\nПотом выбирайте вопрос.",
+        title: "Тема 1",
+      },
+      phase: "theme-explanation",
+      timer: null,
+    });
+    expect(manager.getDisplayState(room.roomCode).game).toMatchObject({
+      activeThemeExplanation: {
+        description:
+          "Сначала прочитайте правила темы.\nПотом выбирайте вопрос.",
+        title: "Тема 1",
+      },
+      phase: "theme-explanation",
+    });
+
+    manager.skipTimer(room.roomCode, room.hostToken);
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      activeThemeExplanation: null,
+      phase: "board",
+    });
+  });
+
+  it("автоматически запускает медиа, переключает паузу и перезапускает его", () => {
+    const quiz = createQuiz();
+    quiz.rounds[0]!.themes[0]!.questions[0]!.content.media = {
+      durationMs: 5_000,
+      kind: "video",
+      mimeType: "video/mp4",
+      path: "assets/test-game/media/question.mp4",
+      trimEndMs: 4_000,
+      trimStartMs: 500,
+    };
+    let now = 1_000;
+    const manager = createManager(() => now);
+    const room = manager.createRoom(quiz);
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    manager.completeQuestionIntro(room.roomCode);
+
+    const started = manager.getDisplayState(room.roomCode).game;
+    expect(started?.activeQuestion?.media).toMatchObject({ kind: "video" });
+    expect(started?.mediaPlayback).toMatchObject({
+      playing: true,
+      positionMs: 500,
+      startedAt: 1_000,
+    });
+
+    now = 1_750;
+    manager.stopMedia(room.roomCode, room.hostToken);
+    expect(
+      manager.getHostState(room.roomCode).game?.mediaPlayback,
+    ).toMatchObject({ playing: false, positionMs: 1_250, startedAt: null });
+
+    now = 2_000;
+    manager.stopMedia(room.roomCode, room.hostToken);
+    expect(
+      manager.getDisplayState(room.roomCode).game?.mediaPlayback,
+    ).toMatchObject({ playing: true, positionMs: 1_250, startedAt: 2_000 });
+
+    now = 2_250;
+    manager.restartMedia(room.roomCode, room.hostToken);
+    expect(
+      manager.getDisplayState(room.roomCode).game?.mediaPlayback,
+    ).toMatchObject({ playing: true, positionMs: 500, startedAt: 2_250 });
+  });
+
   it("создаёт предложение и меняет счёт только после подтверждения", () => {
     const manager = createManager();
     const room = manager.createRoom(createQuiz());
@@ -102,6 +196,11 @@ describe("игровая сессия", () => {
     manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
     const buzzer = manager.completeQuestionIntro(room.roomCode);
     manager.pressBuzzer(room.roomCode, player.playerToken, buzzer.buzzWindowId);
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+    );
     manager.judgeAnswer(room.roomCode, room.hostToken, "correct");
 
     const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
@@ -114,6 +213,12 @@ describe("игровая сессия", () => {
     expect(manager.getPlayerState(room.roomCode, player.playerId).score).toBe(
       120,
     );
+    expect(
+      manager.getPlayerState(room.roomCode, player.playerId),
+    ).toMatchObject({
+      answerDelta: 120,
+      buzzer: { status: "correct" },
+    });
     expect(manager.getHostState(room.roomCode).game?.phase).toBe(
       "answer-reveal",
     );
@@ -122,7 +227,178 @@ describe("игровая сессия", () => {
     ).toThrow(RoomError);
   });
 
-  it("после неверного ответа открывает новое окно только остальным", () => {
+  it("разрешает ручную корректировку на сетке и запрещает её во время вопроса", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+
+    manager.adjustPlayerScore(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+      200,
+    );
+    expect(manager.getPlayerState(room.roomCode, player.playerId).score).toBe(
+      200,
+    );
+
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    expect(() =>
+      manager.adjustPlayerScore(
+        room.roomCode,
+        room.hostToken,
+        player.playerId,
+        100,
+      ),
+    ).toThrow(RoomError);
+  });
+
+  it("собирает очередь нажатий и позволяет ведущему выбрать отвечающего", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    const first = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    const second = manager.addPlayer(room.roomCode, "Борис", "socket-2");
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    const buzzer = manager.completeQuestionIntro(room.roomCode);
+
+    manager.pressBuzzer(room.roomCode, first.playerToken, buzzer.buzzWindowId);
+    manager.pressBuzzer(room.roomCode, second.playerToken, buzzer.buzzWindowId);
+
+    expect(manager.getHostState(room.roomCode).players).toEqual([
+      expect.objectContaining({ buzzPosition: 1, id: first.playerId }),
+      expect.objectContaining({ buzzPosition: 2, id: second.playerId }),
+    ]);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe("buzzing");
+
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      second.playerId,
+    );
+
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      activeQuestion: { currentPlayerId: second.playerId },
+      phase: "answering",
+    });
+    expect(manager.getHostState(room.roomCode).buzzer.winner?.id).toBe(
+      second.playerId,
+    );
+    expect(
+      manager.getPlayerState(room.roomCode, second.playerId).buzzer.status,
+    ).toBe("winner");
+    expect(
+      manager.getPlayerState(room.roomCode, first.playerId).buzzer.status,
+    ).toBe("other-player-answering");
+  });
+
+  it("позволяет ведущему пропускать активные таймеры", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+
+    const opened = manager.skipTimer(room.roomCode, room.hostToken);
+    expect(opened).not.toBeNull();
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe("buzzing");
+
+    manager.pressBuzzer(
+      room.roomCode,
+      player.playerToken,
+      opened!.buzzWindowId,
+    );
+    manager.skipTimer(room.roomCode, room.hostToken);
+    expect(manager.getHostState(room.roomCode).buzzer.status).toBe("closed");
+    expect(
+      manager.getPlayerState(room.roomCode, player.playerId).buzzer.status,
+    ).toBe("queued");
+
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+    );
+    manager.skipTimer(room.roomCode, room.hostToken);
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    expect(proposal).toMatchObject({
+      judgement: "timeout",
+      playerId: player.playerId,
+      suggestedDelta: 0,
+    });
+
+    manager.confirmScore(room.roomCode, room.hostToken, proposal!.id, 0);
+    manager.skipTimer(room.roomCode, room.hostToken);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe("board");
+  });
+
+  it("списывает цену вопроса со всех игроков только после подтверждения", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    const first = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    const second = manager.addPlayer(room.roomCode, "Борис", "socket-2");
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    manager.completeQuestionIntro(room.roomCode);
+
+    manager.proposeNoAnswerPenalty(room.roomCode, room.hostToken);
+
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    expect(proposal).toMatchObject({
+      playerIds: [first.playerId, second.playerId],
+      playerNames: ["Анна", "Борис"],
+      suggestedDelta: -100,
+      target: "all-players",
+    });
+    expect(manager.getPlayerState(room.roomCode, first.playerId).score).toBe(0);
+    expect(manager.getPlayerState(room.roomCode, second.playerId).score).toBe(
+      0,
+    );
+
+    manager.confirmScore(
+      room.roomCode,
+      room.hostToken,
+      proposal!.id,
+      proposal!.suggestedDelta,
+    );
+
+    expect(manager.getPlayerState(room.roomCode, first.playerId).score).toBe(
+      -100,
+    );
+    expect(manager.getPlayerState(room.roomCode, second.playerId).score).toBe(
+      -100,
+    );
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe(
+      "answer-reveal",
+    );
+  });
+
+  it("после отмены общего списания переоткрывает сохранённую очередь", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    const firstWindow = manager.completeQuestionIntro(room.roomCode);
+    manager.pressBuzzer(
+      room.roomCode,
+      player.playerToken,
+      firstWindow.buzzWindowId,
+    );
+
+    manager.proposeNoAnswerPenalty(room.roomCode, room.hostToken);
+    manager.cancelScoreProposal(room.roomCode, room.hostToken);
+
+    const state = manager.getHostState(room.roomCode);
+    expect(state.game?.phase).toBe("buzzing");
+    expect(state.game?.scoreProposal).toBeNull();
+    expect(state.buzzer.status).toBe("open");
+    expect(state.buzzer.windowId).toBe(firstWindow.buzzWindowId);
+    expect(state.players[0]?.buzzPosition).toBe(1);
+  });
+
+  it("после неверного ответа сохраняет очередь только для остальных", () => {
     const manager = createManager();
     const room = manager.createRoom(createQuiz());
     const first = manager.addPlayer(room.roomCode, "Анна", "socket-1");
@@ -135,6 +411,16 @@ describe("игровая сессия", () => {
       first.playerToken,
       firstWindow.buzzWindowId,
     );
+    manager.pressBuzzer(
+      room.roomCode,
+      second.playerToken,
+      firstWindow.buzzWindowId,
+    );
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      first.playerId,
+    );
     manager.judgeAnswer(room.roomCode, room.hostToken, "incorrect");
     const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
     const outcome = manager.confirmScore(
@@ -143,14 +429,31 @@ describe("игровая сессия", () => {
       proposal!.id,
       proposal!.suggestedDelta,
     );
-    const secondWindow = manager.getHostState(room.roomCode).buzzer.windowId;
+    const state = manager.getHostState(room.roomCode);
+    const secondWindow = state.buzzer.windowId;
 
     expect(outcome).toBe("buzzing");
-    expect(secondWindow).not.toBe(firstWindow.buzzWindowId);
+    expect(secondWindow).toBe(firstWindow.buzzWindowId);
+    expect(state.players).toEqual([
+      expect.objectContaining({ buzzPosition: 1, id: first.playerId }),
+      expect.objectContaining({ buzzPosition: 2, id: second.playerId }),
+    ]);
     expect(
       manager.getPlayerState(room.roomCode, first.playerId).buzzer.status,
     ).toBe("answered-incorrectly");
-    manager.pressBuzzer(room.roomCode, second.playerToken, secondWindow!);
+    expect(() =>
+      manager.selectAnsweringPlayer(
+        room.roomCode,
+        room.hostToken,
+        first.playerId,
+      ),
+    ).toThrow(RoomError);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe("buzzing");
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      second.playerId,
+    );
     expect(manager.getHostState(room.roomCode).game?.phase).toBe("answering");
   });
 
@@ -162,6 +465,10 @@ describe("игровая сессия", () => {
       alt: "Тестовое изображение",
       path: "assets/test-game/images/question.webp",
     };
+    question.answerImage = {
+      alt: "Изображение правильного ответа",
+      path: "assets/test-game/images/answer.webp",
+    };
     const manager = createManager();
     const room = manager.createRoom(quiz);
     const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
@@ -172,6 +479,7 @@ describe("игровая сессия", () => {
     const introState = manager.getDisplayState(room.roomCode);
     expect(introState.game?.activeQuestion).toMatchObject({
       answer: null,
+      answerImage: null,
       currentPlayerName: null,
       image: null,
       price: 100,
@@ -186,6 +494,7 @@ describe("игровая сессия", () => {
     const questionState = manager.getDisplayState(room.roomCode);
     expect(questionState.game?.activeQuestion).toMatchObject({
       answer: null,
+      answerImage: null,
       currentPlayerName: null,
       image: question.content.image,
       text: "Вопрос 1",
@@ -196,6 +505,17 @@ describe("игровая сессия", () => {
     );
 
     manager.pressBuzzer(room.roomCode, player.playerToken, buzzer.buzzWindowId);
+    expect(
+      manager.getDisplayState(room.roomCode).game?.activeQuestion,
+    ).toMatchObject({
+      answer: null,
+      currentPlayerName: null,
+    });
+    manager.selectAnsweringPlayer(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+    );
     expect(
       manager.getDisplayState(room.roomCode).game?.activeQuestion,
     ).toMatchObject({
@@ -215,6 +535,12 @@ describe("игровая сессия", () => {
     const revealState = manager.getDisplayState(room.roomCode);
     expect(revealState.game?.phase).toBe("answer-reveal");
     expect(revealState.game?.activeQuestion?.answer).toBe("Ответ 1");
+    expect(revealState.game?.activeQuestion?.answerImage).toEqual(
+      question.answerImage,
+    );
+    expect(revealState.game?.activeQuestion?.image).toBeNull();
+    expect(revealState.game?.activeQuestion?.text).toBeNull();
+    expect(revealState).not.toHaveProperty("players");
     expect(JSON.stringify(revealState)).not.toContain(
       "Секретная подсказка ведущему",
     );
@@ -235,6 +561,47 @@ describe("игровая сессия", () => {
     });
 
     manager.selectQuestion(room.roomCode, room.hostToken, secondQuestionId);
+    manager.completeQuestionIntro(room.roomCode);
+    manager.revealAnswer(room.roomCode, room.hostToken);
+    manager.finishQuestion(room.roomCode);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe(
+      "game-finished",
+    );
+  });
+
+  it("позволяет ведущему переключать раунды и завершает игру только после всех вопросов", () => {
+    const manager = createManager();
+    const room = manager.createRoom(createQuiz());
+    manager.startSession(room.roomCode, room.hostToken);
+
+    manager.changeRound(room.roomCode, room.hostToken, 1);
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      board: [
+        {
+          questions: [{ id: secondQuestionId }],
+          title: "Тема 2",
+        },
+      ],
+      currentRoundIndex: 1,
+    });
+
+    manager.selectQuestion(room.roomCode, room.hostToken, secondQuestionId);
+    expect(() => manager.changeRound(room.roomCode, room.hostToken, 0)).toThrow(
+      RoomError,
+    );
+    manager.completeQuestionIntro(room.roomCode);
+    manager.revealAnswer(room.roomCode, room.hostToken);
+    manager.finishQuestion(room.roomCode);
+
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      currentRoundIndex: 0,
+      phase: "board",
+    });
+    expect(() => manager.changeRound(room.roomCode, room.hostToken, 2)).toThrow(
+      RoomError,
+    );
+
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
     manager.completeQuestionIntro(room.roomCode);
     manager.revealAnswer(room.roomCode, room.hostToken);
     manager.finishQuestion(room.roomCode);
