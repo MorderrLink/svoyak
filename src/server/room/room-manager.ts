@@ -39,6 +39,7 @@ export interface RoomManagerOptions {
   idGenerator?: () => string;
   journal?: SessionEventWriter;
   now?: () => number;
+  random?: () => number;
   tokenGenerator?: () => string;
 }
 
@@ -65,6 +66,11 @@ export interface AttachedHost {
 export interface OpenedBuzzer {
   buzzWindowId: string;
   timer: TimerState;
+}
+
+export interface SelectedQuestion {
+  buzzer: OpenedBuzzer | null;
+  timer: TimerState | null;
 }
 
 export interface PlayerConnectionMetadata {
@@ -120,6 +126,7 @@ export class RoomManager {
   private readonly idGenerator: () => string;
   private readonly journal: SessionEventWriter | undefined;
   private readonly now: () => number;
+  private readonly random: () => number;
   private readonly tokenGenerator: () => string;
 
   constructor(options: RoomManagerOptions = {}) {
@@ -127,6 +134,7 @@ export class RoomManager {
     this.idGenerator = options.idGenerator ?? randomUUID;
     this.journal = options.journal;
     this.now = options.now ?? Date.now;
+    this.random = options.random ?? Math.random;
     this.tokenGenerator = options.tokenGenerator ?? randomUUID;
   }
 
@@ -401,12 +409,16 @@ export class RoomManager {
   ): OpenedBuzzer {
     const room = this.requireHost(roomCode, hostToken);
     const gameDurationMs =
-      room.session?.getPhase() === "buzzing"
+      room.session?.getPhase() === "buzzing" ||
+      room.session?.getPhase() === "modifier-buzzing"
         ? (room.quizSnapshot?.settings.buzzSeconds ?? durationMs / 1_000) *
           1_000
         : durationMs;
     const opened = this.openBuzzerRecord(room, gameDurationMs);
-    if (room.session?.getPhase() === "buzzing") {
+    if (
+      room.session?.getPhase() === "buzzing" ||
+      room.session?.getPhase() === "modifier-buzzing"
+    ) {
       room.session.setBuzzTimer(opened.timer);
     }
     this.touch(room);
@@ -448,7 +460,10 @@ export class RoomManager {
 
     buzzer.status = "closed";
     buzzer.closeReason = "expired";
-    if (room.session?.getPhase() === "buzzing") {
+    if (
+      room.session?.getPhase() === "buzzing" ||
+      room.session?.getPhase() === "modifier-buzzing"
+    ) {
       room.session.expireBuzzTimer();
     }
     this.touch(room);
@@ -503,6 +518,12 @@ export class RoomManager {
     }
 
     buzzer.pressedPlayerIds.add(player.id);
+    if (room.session?.getPhase() === "modifier-buzzing") {
+      room.session.claimModifier(player.id, room.players);
+      buzzer.winnerPlayerId = player.id;
+      buzzer.status = "winner";
+      buzzer.closeReason = "manual";
+    }
     this.touch(room);
     this.recordEvent({
       details: {
@@ -566,6 +587,7 @@ export class RoomManager {
       room.quizSnapshot,
       this.now,
       this.idGenerator,
+      this.random,
     );
     room.buzzer = null;
     this.touch(room);
@@ -607,16 +629,51 @@ export class RoomManager {
     roomCode: string,
     hostToken: string,
     questionId: string,
-  ): TimerState {
+  ): SelectedQuestion {
     const room = this.requireHost(roomCode, hostToken);
-    const timer = this.requireSession(room).selectQuestion(questionId);
+    const session = this.requireSession(room);
+    const selection = session.selectQuestion(questionId, room.players);
     room.buzzer = null;
+    let buzzer: OpenedBuzzer | null = null;
+    if (selection.kind === "modifier") {
+      const durationMs =
+        (room.quizSnapshot?.settings.buzzSeconds ?? 10) * 1_000;
+      buzzer = this.openBuzzerRecord(room, durationMs);
+      session.setBuzzTimer(buzzer.timer);
+    }
     this.touch(room);
     this.recordEvent({
       details: { questionId },
       roomCode,
       type: "question_selected",
     });
+    return { buzzer, timer: selection.timer };
+  }
+
+  submitWager(
+    roomCode: string,
+    playerToken: string,
+    wager: number,
+  ): TimerState | null {
+    const room = this.requireRoom(roomCode);
+    const player = this.findPlayerByToken(room, playerToken);
+    const timer = this.requireSession(room).submitWager(player.id, wager);
+    this.touch(room);
+    return timer;
+  }
+
+  configureGiveaway(
+    roomCode: string,
+    hostToken: string,
+    playerId: string,
+    wager: number,
+  ): TimerState {
+    const room = this.requireHost(roomCode, hostToken);
+    if (!room.players.has(playerId)) {
+      throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
+    }
+    const timer = this.requireSession(room).configureGiveaway(playerId, wager);
+    this.touch(room);
     return timer;
   }
 
@@ -634,10 +691,15 @@ export class RoomManager {
     this.recordEvent({ roomCode, type: "media_stopped" });
   }
 
-  completeQuestionIntro(roomCode: string): OpenedBuzzer {
+  completeQuestionIntro(roomCode: string): OpenedBuzzer | null {
     const room = this.requireRoom(roomCode);
     const session = this.requireSession(room);
-    session.completeQuestionIntro();
+    const phase = session.completeQuestionIntro();
+    if (phase === "answering") {
+      room.buzzer = null;
+      this.touch(room);
+      return null;
+    }
     const durationMs = (room.quizSnapshot?.settings.buzzSeconds ?? 10) * 1_000;
     const opened = this.openBuzzerRecord(room, durationMs);
     session.setBuzzTimer(opened.timer);
@@ -668,7 +730,10 @@ export class RoomManager {
     });
   }
 
-  cancelScoreProposal(roomCode: string, hostToken: string): void {
+  cancelScoreProposal(
+    roomCode: string,
+    hostToken: string,
+  ): "answer-reveal" | "answering" | "buzzing" {
     const room = this.requireHost(roomCode, hostToken);
     const session = this.requireSession(room);
     const outcome = session.cancelScoreProposal();
@@ -678,8 +743,11 @@ export class RoomManager {
         (room.quizSnapshot?.settings.buzzSeconds ?? 10) * 1_000;
       const opened = this.reopenBuzzerRecord(room, durationMs);
       session.setBuzzTimer(opened.timer);
+    } else if (outcome === "answer-reveal") {
+      room.buzzer = null;
     }
     this.touch(room);
+    return outcome;
   }
 
   proposeNoAnswerPenalty(roomCode: string, hostToken: string): void {
@@ -850,7 +918,7 @@ export class RoomManager {
       this.touch(room);
     } else if (phase === "question-intro") {
       opened = this.completeQuestionIntro(roomCode);
-    } else if (phase === "buzzing") {
+    } else if (phase === "buzzing" || phase === "modifier-buzzing") {
       if (room.buzzer === null || room.buzzer.status !== "open") {
         throw new RoomError(
           "SESSION_INVALID_PHASE",
@@ -972,6 +1040,8 @@ export class RoomManager {
     if (player === undefined) {
       throw new RoomError("PLAYER_UNAUTHORIZED", "Игрок не найден");
     }
+    const wagerState = room.session?.getState().wagers ?? null;
+    const submittedWager = room.session?.getPlayerWager(playerId) ?? null;
 
     return {
       answerDelta: room.session?.getAnswerDelta(playerId) ?? null,
@@ -991,6 +1061,14 @@ export class RoomManager {
       roomCode: room.code,
       score: player.score,
       showScore: room.quizSnapshot?.settings.showScoresToPlayers ?? true,
+      wager:
+        room.session?.getPhase() === "wagering" && wagerState !== null
+          ? {
+              maximum: wagerState.maximum,
+              submitted: submittedWager !== null,
+              value: submittedWager ?? Math.min(100, wagerState.maximum),
+            }
+          : null,
     };
   }
 

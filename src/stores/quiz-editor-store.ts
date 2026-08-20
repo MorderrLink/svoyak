@@ -7,6 +7,7 @@ import {
   createQuestion,
   createQuizSlug,
   createRound,
+  createSpecialModifier,
   createTheme,
 } from "@/shared/quiz/factory";
 import type {
@@ -15,6 +16,7 @@ import type {
   QuizMedia,
   QuizQuestion,
   QuizSettings,
+  QuizSpecialModifier,
 } from "@/shared/types/quiz";
 
 interface QuizEditorState {
@@ -26,6 +28,7 @@ interface QuizEditorState {
   slugManuallyEdited: boolean;
   addQuestion: (roundId: string, themeId: string) => void;
   addRound: () => void;
+  addSpecialModifier: (kind: QuizSpecialModifier["kind"]) => void;
   addTheme: (roundId: string) => void;
   initialize: (quiz: QuizConfig) => void;
   markSaved: (quiz: QuizConfig) => void;
@@ -37,6 +40,7 @@ interface QuizEditorState {
     questionId: string,
   ) => void;
   removeRound: (roundId: string) => void;
+  removeSpecialModifier: (modifierId: string) => void;
   removeTheme: (roundId: string, themeId: string) => void;
   setError: (error: string | null) => void;
   setSaving: (saving: boolean) => void;
@@ -63,6 +67,12 @@ interface QuizEditorState {
     themeId: string,
     questionId: string,
     alt: string,
+  ) => void;
+  setQuestionWagerLimit: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    wagerLimit: number | undefined,
   ) => void;
   setAnswerImage: (
     roundId: string,
@@ -91,6 +101,10 @@ interface QuizEditorState {
     roundId: string,
     themeId: string,
     description: string,
+  ) => void;
+  updateSpecialModifier: (
+    modifierId: string,
+    patch: { delta?: number; text?: string },
   ) => void;
 }
 
@@ -144,6 +158,13 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
     set((state) =>
       updateDraft(state, (draft) => {
         draft.rounds.push(createRound(draft.rounds.length));
+      }),
+    );
+  },
+  addSpecialModifier: (kind) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        (draft.specialModifiers ??= []).push(createSpecialModifier(kind));
       }),
     );
   },
@@ -247,6 +268,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
       }),
     );
   },
+  removeSpecialModifier: (modifierId) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        draft.specialModifiers = (draft.specialModifiers ?? []).filter(
+          (modifier) => modifier.id !== modifierId,
+        );
+      }),
+    );
+  },
   removeTheme: (roundId, themeId) => {
     set((state) =>
       updateDraft(state, (draft) => {
@@ -341,6 +371,19 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.content.image;
         if (image !== undefined) {
           image.alt = alt.trim() === "" ? DEFAULT_IMAGE_ALT_TEXT : alt;
+        }
+      }),
+    );
+  },
+  setQuestionWagerLimit: (roundId, themeId, questionId, wagerLimit) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.wagerLimit = wagerLimit;
         }
       }),
     );
@@ -451,6 +494,20 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
         if (theme !== undefined) {
           theme.description =
             description.trim() === "" ? undefined : description;
+        }
+      }),
+    );
+  },
+  updateSpecialModifier: (modifierId, patch) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const modifier = draft.specialModifiers?.find(
+          (candidate) => candidate.id === modifierId,
+        );
+        if (modifier === undefined) return;
+        if (patch.text !== undefined) modifier.text = patch.text;
+        if (modifier.kind === "money" && patch.delta !== undefined) {
+          modifier.delta = patch.delta;
         }
       }),
     );

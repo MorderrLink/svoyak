@@ -1,5 +1,6 @@
 import { RoomError } from "@/server/room/room-error";
 import type { PlayerRecord } from "@/server/room/types";
+import { quizLimits } from "@/shared/constants/quiz";
 import type {
   AllPlayersScoreChangeProposal,
   AnswerJudgement,
@@ -8,20 +9,30 @@ import type {
   GamePhase,
   HostActiveQuestion,
   HostGameState,
+  HostWagerState,
   MediaPlaybackState,
   PlayerScoreChangeProposal,
   ScoreChangeProposal,
   ThemeExplanation,
   TimerState,
 } from "@/shared/contracts/socket";
-import type { QuizConfig, QuizQuestion, QuizTheme } from "@/shared/types/quiz";
+import type {
+  QuizConfig,
+  QuizQuestion,
+  QuizSpecialModifier,
+  QuizTheme,
+} from "@/shared/types/quiz";
 
 interface ActiveQuestionRecord {
   attemptedPlayerIds: Set<string>;
   correctPlayerId: string | null;
   currentPlayerId: string | null;
+  exclusiveAnswer: boolean;
+  giveawayWager: number | null;
   questionId: string;
   scoreDeltas: Map<string, number>;
+  wagerPlayerIds: Set<string>;
+  wagers: Map<string, number>;
 }
 
 interface LocatedQuestion {
@@ -30,7 +41,13 @@ interface LocatedQuestion {
 }
 
 export type ScoreConfirmationOutcome = "answer-reveal" | "buzzing";
-export type ScoreCancellationOutcome = "answering" | "buzzing";
+export type ScoreCancellationOutcome =
+  "answer-reveal" | "answering" | "buzzing";
+
+export interface QuestionSelectionResult {
+  kind: "giveaway" | "modifier" | "question-intro" | "wagering";
+  timer: TimerState | null;
+}
 
 export class GameSession {
   private activeQuestion: ActiveQuestionRecord | null = null;
@@ -39,6 +56,8 @@ export class GameSession {
   private phase: GamePhase = "board";
   private readonly playedQuestionIds = new Set<string>();
   private mediaPlayback: MediaPlaybackState | null = null;
+  private readonly giveawayQuestions = new Map<string, QuizSpecialModifier>();
+  private readonly generatedModifiers = new Map<string, QuizSpecialModifier>();
   private readonly quiz: QuizConfig;
   private scoreProposal: ScoreChangeProposal | null = null;
   private timer: TimerState | null = null;
@@ -47,8 +66,10 @@ export class GameSession {
     quizSnapshot: QuizConfig,
     private readonly now: () => number,
     private readonly idGenerator: () => string,
+    private readonly random: () => number = Math.random,
   ) {
     this.quiz = structuredClone(quizSnapshot);
+    this.prepareSpecialModifiers();
   }
 
   getPhase(): GamePhase {
@@ -71,6 +92,10 @@ export class GameSession {
 
   getAnswerDelta(playerId: string): number | null {
     return this.activeQuestion?.scoreDeltas.get(playerId) ?? null;
+  }
+
+  getPlayerWager(playerId: string): number | null {
+    return this.activeQuestion?.wagers.get(playerId) ?? null;
   }
 
   changeRound(roundIndex: number): void {
@@ -108,7 +133,10 @@ export class GameSession {
     this.timer = null;
   }
 
-  selectQuestion(questionId: string): TimerState {
+  selectQuestion(
+    questionId: string,
+    players: Map<string, PlayerRecord>,
+  ): QuestionSelectionResult {
     this.requirePhase("board");
     const located = this.findQuestionInCurrentRound(questionId);
 
@@ -123,22 +151,50 @@ export class GameSession {
       attemptedPlayerIds: new Set(),
       correctPlayerId: null,
       currentPlayerId: null,
+      exclusiveAnswer: false,
+      giveawayWager: null,
       questionId: located.question.id,
       scoreDeltas: new Map(),
+      wagerPlayerIds: new Set(
+        [...players.values()]
+          .filter((player) => player.connected)
+          .map((player) => player.id),
+      ),
+      wagers: new Map(),
     };
     this.scoreProposal = null;
     this.mediaPlayback = null;
-    this.phase = "question-intro";
-    this.timer = this.createTimer(
-      this.quiz.settings.questionIntroSeconds * 1_000,
-    );
-    return { ...this.timer };
+    const modifier = this.generatedModifiers.get(questionId);
+    if (modifier !== undefined) {
+      this.phase = "modifier-buzzing";
+      this.timer = null;
+      return { kind: "modifier", timer: null };
+    }
+    if (this.giveawayQuestions.has(questionId)) {
+      this.phase = "giveaway-setup";
+      this.timer = null;
+      return { kind: "giveaway", timer: null };
+    }
+    if (located.question.wagerLimit !== undefined) {
+      if (this.activeQuestion.wagerPlayerIds.size > 0) {
+        this.phase = "wagering";
+        this.timer = null;
+        return { kind: "wagering", timer: null };
+      }
+    }
+    return this.beginQuestionIntro();
   }
 
-  completeQuestionIntro(): void {
+  completeQuestionIntro(): "answering" | "buzzing" {
     this.requirePhase("question-intro");
-    this.phase = "buzzing";
     this.timer = null;
+    const activeQuestion = this.requireActiveQuestion();
+    if (activeQuestion.exclusiveAnswer) {
+      this.phase = "answering";
+      this.timer = this.createTimer(this.quiz.settings.answerSeconds * 1_000);
+      return "answering";
+    }
+    this.phase = "buzzing";
     const media = this.getHostActiveQuestion()?.media;
     this.mediaPlayback =
       media === null || media === undefined
@@ -149,6 +205,80 @@ export class GameSession {
             revision: this.idGenerator(),
             startedAt: this.now(),
           };
+    return "buzzing";
+  }
+
+  submitWager(playerId: string, wager: number): TimerState | null {
+    this.requirePhase("wagering");
+    const activeQuestion = this.requireActiveQuestion();
+    const { question } = this.findQuestion(activeQuestion.questionId);
+    const maximum = question.wagerLimit;
+    if (
+      maximum === undefined ||
+      !activeQuestion.wagerPlayerIds.has(playerId) ||
+      wager < quizLimits.wager.min ||
+      wager > maximum ||
+      wager % quizLimits.wager.step !== 0
+    ) {
+      throw new RoomError("INVALID_PAYLOAD", "Некорректная ставка");
+    }
+    activeQuestion.wagers.set(playerId, wager);
+    if (activeQuestion.wagers.size < activeQuestion.wagerPlayerIds.size) {
+      return null;
+    }
+    return this.beginQuestionIntro().timer;
+  }
+
+  configureGiveaway(playerId: string, wager: number): TimerState {
+    this.requirePhase("giveaway-setup");
+    if (
+      wager < quizLimits.wager.min ||
+      wager > quizLimits.wager.max ||
+      wager % quizLimits.wager.step !== 0
+    ) {
+      throw new RoomError("INVALID_PAYLOAD", "Некорректная ставка");
+    }
+    const activeQuestion = this.requireActiveQuestion();
+    activeQuestion.currentPlayerId = playerId;
+    activeQuestion.exclusiveAnswer = true;
+    activeQuestion.giveawayWager = wager;
+    return this.beginQuestionIntro().timer!;
+  }
+
+  claimModifier(
+    playerId: string,
+    players: Map<string, PlayerRecord>,
+  ): PlayerScoreChangeProposal {
+    this.requirePhase("modifier-buzzing");
+    const activeQuestion = this.requireActiveQuestion();
+    const player = players.get(playerId);
+    const modifier = this.generatedModifiers.get(activeQuestion.questionId);
+    if (player === undefined || modifier === undefined) {
+      throw new RoomError("SESSION_INVALID_PHASE", "Модификатор недоступен");
+    }
+    const suggestedDelta =
+      modifier.kind === "money"
+        ? modifier.delta
+        : modifier.kind === "invert-score"
+          ? -2 * player.score
+          : 0;
+    activeQuestion.currentPlayerId = player.id;
+    activeQuestion.exclusiveAnswer = true;
+    const proposal: PlayerScoreChangeProposal = {
+      editedDelta: suggestedDelta,
+      id: this.idGenerator(),
+      judgement: "correct",
+      playerId: player.id,
+      playerName: player.name,
+      questionId: activeQuestion.questionId,
+      questionPrice: 0,
+      suggestedDelta,
+      target: "player",
+    };
+    this.scoreProposal = proposal;
+    this.phase = "score-confirmation";
+    this.timer = null;
+    return { ...proposal };
   }
 
   restartMedia(): void {
@@ -200,12 +330,22 @@ export class GameSession {
   }
 
   setBuzzTimer(timer: TimerState): void {
-    this.requirePhase("buzzing");
+    if (this.phase !== "buzzing" && this.phase !== "modifier-buzzing") {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Окно нажатий нельзя открыть в текущей фазе",
+      );
+    }
     this.timer = { ...timer };
   }
 
   expireBuzzTimer(): void {
-    this.requirePhase("buzzing");
+    if (this.phase !== "buzzing" && this.phase !== "modifier-buzzing") {
+      throw new RoomError(
+        "SESSION_INVALID_PHASE",
+        "Окно нажатий нельзя закрыть в текущей фазе",
+      );
+    }
     this.timer = null;
   }
 
@@ -245,11 +385,16 @@ export class GameSession {
     }
 
     const { question } = this.findQuestion(activeQuestion.questionId);
+    const scoreValue =
+      activeQuestion.giveawayWager ??
+      (question.wagerLimit === undefined
+        ? question.price
+        : (activeQuestion.wagers.get(player.id) ?? quizLimits.wager.min));
     const suggestedDelta =
       judgement === "correct"
-        ? question.price
+        ? scoreValue
         : judgement === "incorrect" && this.quiz.settings.allowNegativeScore
-          ? -question.price
+          ? -scoreValue
           : 0;
     const proposal: PlayerScoreChangeProposal = {
       editedDelta: suggestedDelta,
@@ -258,7 +403,7 @@ export class GameSession {
       playerId: player.id,
       playerName: player.name,
       questionId: question.id,
-      questionPrice: question.price,
+      questionPrice: scoreValue,
       suggestedDelta,
       target: "player",
     };
@@ -308,6 +453,12 @@ export class GameSession {
 
   cancelScoreProposal(): ScoreCancellationOutcome {
     this.requirePhase("score-confirmation");
+    const activeQuestion = this.requireActiveQuestion();
+    if (this.generatedModifiers.has(activeQuestion.questionId)) {
+      this.scoreProposal = null;
+      this.startAnswerReveal();
+      return "answer-reveal";
+    }
     const target = this.scoreProposal?.target;
     this.scoreProposal = null;
     this.phase = target === "all-players" ? "buzzing" : "answering";
@@ -360,11 +511,15 @@ export class GameSession {
 
     if (proposal.judgement === "correct") {
       activeQuestion.correctPlayerId = player.id;
+    } else {
+      activeQuestion.attemptedPlayerIds.add(player.id);
+    }
+
+    if (proposal.judgement === "correct" || activeQuestion.exclusiveAnswer) {
       this.startAnswerReveal();
       return "answer-reveal";
     }
 
-    activeQuestion.attemptedPlayerIds.add(player.id);
     activeQuestion.currentPlayerId = null;
     const hasEligiblePlayer = [...players.values()].some(
       (candidate) =>
@@ -451,6 +606,7 @@ export class GameSession {
               }
             : { ...this.scoreProposal },
       timer: this.timer === null ? null : { ...this.timer },
+      wagers: this.getHostWagerState(),
     };
   }
 
@@ -463,7 +619,10 @@ export class GameSession {
     const showsActiveQuestion =
       showsQuestion ||
       this.phase === "answer-reveal" ||
-      this.phase === "question-intro";
+      this.phase === "giveaway-setup" ||
+      this.phase === "modifier-buzzing" ||
+      this.phase === "question-intro" ||
+      this.phase === "wagering";
     const currentPlayer =
       activeQuestion?.currentPlayerId === null ||
       activeQuestion?.currentPlayerId === undefined
@@ -515,6 +674,72 @@ export class GameSession {
     );
   }
 
+  private beginQuestionIntro(): QuestionSelectionResult {
+    this.phase = "question-intro";
+    this.timer = this.createTimer(
+      this.quiz.settings.questionIntroSeconds * 1_000,
+    );
+    return { kind: "question-intro", timer: { ...this.timer } };
+  }
+
+  private getHostWagerState(): HostWagerState | null {
+    if (this.phase !== "wagering" || this.activeQuestion === null) {
+      return null;
+    }
+    const { question } = this.findQuestion(this.activeQuestion.questionId);
+    if (question.wagerLimit === undefined) return null;
+    return {
+      maximum: question.wagerLimit,
+      submittedPlayerIds: [...this.activeQuestion.wagers.keys()],
+      totalPlayerCount: this.activeQuestion.wagerPlayerIds.size,
+    };
+  }
+
+  private prepareSpecialModifiers(): void {
+    const modifiers = this.quiz.specialModifiers ?? [];
+    const normalQuestions = this.quiz.rounds.flatMap((round) =>
+      round.themes.flatMap((theme) => theme.questions),
+    );
+    const giveawayCandidates = [...normalQuestions];
+
+    for (const modifier of modifiers) {
+      if (modifier.kind === "giveaway") {
+        if (giveawayCandidates.length === 0) continue;
+        const candidateIndex = Math.min(
+          giveawayCandidates.length - 1,
+          Math.floor(this.random() * giveawayCandidates.length),
+        );
+        const [question] = giveawayCandidates.splice(candidateIndex, 1);
+        if (question !== undefined) {
+          this.giveawayQuestions.set(question.id, modifier);
+        }
+        continue;
+      }
+
+      const allThemes = this.quiz.rounds.flatMap((round) => round.themes);
+      if (allThemes.length === 0) continue;
+      const minimumQuestionCount = Math.min(
+        ...allThemes.map((theme) => theme.questions.length),
+      );
+      const shortestThemes = allThemes.filter(
+        (theme) => theme.questions.length === minimumQuestionCount,
+      );
+      const themeIndex = Math.min(
+        shortestThemes.length - 1,
+        Math.floor(this.random() * shortestThemes.length),
+      );
+      const theme = shortestThemes[themeIndex];
+      if (theme === undefined) continue;
+      theme.questions.push({
+        answer: modifier.text,
+        content: { text: modifier.text },
+        id: modifier.id,
+        price: 0,
+      });
+      this.generatedModifiers.set(modifier.id, modifier);
+    }
+  }
+
   private getBoard(): GameBoardTheme[] {
     const round = this.quiz.rounds[this.currentRoundIndex];
 
@@ -527,6 +752,7 @@ export class GameSession {
       id: theme.id,
       questions: theme.questions.map((question) => ({
         id: question.id,
+        label: this.generatedModifiers.has(question.id) ? "Модификатор" : null,
         played: this.playedQuestionIds.has(question.id),
         price: question.price,
       })),
@@ -560,6 +786,7 @@ export class GameSession {
     const { question, theme } = this.findQuestion(
       this.activeQuestion.questionId,
     );
+    const modifier = this.generatedModifiers.get(question.id);
 
     return {
       answer: question.answer,
@@ -570,9 +797,21 @@ export class GameSession {
       id: question.id,
       image: question.content.image ?? null,
       media: question.content.media ?? null,
-      price: question.price,
+      price: this.activeQuestion.giveawayWager ?? question.price,
+      specialModifier:
+        modifier === undefined
+          ? this.giveawayQuestions.has(question.id)
+            ? {
+                kind: "giveaway",
+                text:
+                  this.giveawayQuestions.get(question.id)?.text ??
+                  "Отдай вопрос",
+              }
+            : null
+          : { kind: modifier.kind, text: modifier.text },
       text: question.content.text?.trim() || null,
       themeTitle: theme.title,
+      wagerLimit: question.wagerLimit ?? null,
     };
   }
 

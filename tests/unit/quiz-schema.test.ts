@@ -66,6 +66,28 @@ describe("quizConfigSchema", () => {
     );
   });
 
+  it("проверяет лимит ставки и конфигурацию спецмодификаторов", () => {
+    const quiz = createValidQuiz();
+    getFirstQuestion(quiz).wagerLimit = 1_500;
+    quiz.specialModifiers = [
+      {
+        delta: -2_000,
+        id: "00000000-0000-4000-8000-000000000010",
+        kind: "money",
+        text: "Как нажать обратно?",
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000011",
+        kind: "mercy",
+        text: "Проси милостыню",
+      },
+    ];
+
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(true);
+    getFirstQuestion(quiz).wagerLimit = 1_550;
+    expect(quizConfigSchema.safeParse(quiz).success).toBe(false);
+  });
+
   it("отклоняет неизвестную версию схемы", () => {
     const quiz = {
       ...createValidQuiz(),

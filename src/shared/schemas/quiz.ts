@@ -164,6 +164,16 @@ export const questionContentSchema = z
 
 export const textQuestionContentSchema = questionContentSchema;
 
+const wagerLimitSchema = z
+  .number()
+  .int()
+  .min(quizLimits.wager.min)
+  .max(quizLimits.wager.max)
+  .refine(
+    (value) => value % quizLimits.wager.step === 0,
+    `Максимальная ставка должна быть кратна ${quizLimits.wager.step}`,
+  );
+
 export const quizQuestionSchema = z
   .object({
     answer: z.string().trim().max(quizLimits.answerLength),
@@ -181,6 +191,7 @@ export const quizQuestionSchema = z
       .int()
       .min(quizLimits.questionPrice.min)
       .max(quizLimits.questionPrice.max),
+    wagerLimit: wagerLimitSchema.optional(),
   })
   .strict()
   .superRefine((question, context) => {
@@ -192,6 +203,43 @@ export const quizQuestionSchema = z
       });
     }
   });
+
+const specialModifierBaseSchema = z.object({
+  id: entityIdSchema,
+  text: z
+    .string()
+    .trim()
+    .min(1, "Введите текст модификатора")
+    .max(quizLimits.specialModifierTextLength),
+});
+
+export const quizSpecialModifierSchema = z.discriminatedUnion("kind", [
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("giveaway"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      delta: z
+        .number()
+        .int()
+        .min(-quizLimits.questionPrice.max)
+        .max(quizLimits.questionPrice.max),
+      kind: z.literal("money"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("invert-score"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("mercy"),
+    })
+    .strict(),
+]);
 
 export const quizThemeSchema = z
   .object({
@@ -241,6 +289,7 @@ export const quizConfigSchema = z
     rounds: z.array(quizRoundSchema).min(1, "Добавьте хотя бы один раунд"),
     schemaVersion: z.literal(QUIZ_SCHEMA_VERSION),
     settings: quizSettingsSchema,
+    specialModifiers: z.array(quizSpecialModifierSchema).optional(),
     slug: z
       .string()
       .min(1)
@@ -285,6 +334,13 @@ export const quizConfigSchema = z
     };
 
     registerIdentifier(quiz.id, ["id"]);
+    quiz.specialModifiers?.forEach((modifier, modifierIndex) => {
+      registerIdentifier(modifier.id, [
+        "specialModifiers",
+        modifierIndex,
+        "id",
+      ]);
+    });
     quiz.rounds.forEach((round, roundIndex) => {
       registerIdentifier(round.id, ["rounds", roundIndex, "id"]);
 

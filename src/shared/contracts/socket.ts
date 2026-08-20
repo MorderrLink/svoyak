@@ -138,6 +138,13 @@ export interface PlayerScreenState {
   roomCode: string;
   score: number;
   showScore: boolean;
+  wager: PlayerWagerState | null;
+}
+
+export interface PlayerWagerState {
+  maximum: number;
+  submitted: boolean;
+  value: number;
 }
 
 export interface PublicRoomState {
@@ -234,14 +241,18 @@ export type GamePhase =
   | "board"
   | "buzzing"
   | "game-finished"
+  | "giveaway-setup"
   | "lobby"
+  | "modifier-buzzing"
   | "question-intro"
   | "round-finished"
   | "score-confirmation"
-  | "theme-explanation";
+  | "theme-explanation"
+  | "wagering";
 
 export interface GameBoardQuestion {
   id: string;
+  label: string | null;
   played: boolean;
   price: number;
 }
@@ -269,8 +280,24 @@ export interface HostActiveQuestion {
   image: QuizImage | null;
   media: QuizMedia | null;
   price: number;
+  specialModifier: ActiveSpecialModifier | null;
   text: string | null;
   themeTitle: string;
+  wagerLimit: number | null;
+}
+
+export type SpecialModifierKind =
+  "giveaway" | "invert-score" | "mercy" | "money";
+
+export interface ActiveSpecialModifier {
+  kind: SpecialModifierKind;
+  text: string;
+}
+
+export interface HostWagerState {
+  maximum: number;
+  submittedPlayerIds: string[];
+  totalPlayerCount: number;
 }
 
 export type AnswerJudgement = "correct" | "incorrect" | "timeout";
@@ -310,6 +337,7 @@ export interface HostGameState {
   roundCount: number;
   scoreProposal: ScoreChangeProposal | null;
   timer: TimerState | null;
+  wagers: HostWagerState | null;
 }
 
 export interface SelectQuestionPayload extends HostCommandPayload {
@@ -322,6 +350,17 @@ export interface SelectThemePayload extends HostCommandPayload {
 
 export interface SelectAnsweringPlayerPayload extends HostCommandPayload {
   playerId: string;
+}
+
+export interface ConfigureGiveawayPayload extends HostCommandPayload {
+  playerId: string;
+  wager: number;
+}
+
+export interface SubmitWagerPayload {
+  playerToken: string;
+  roomCode: string;
+  wager: number;
 }
 
 export interface ChangeRoundPayload extends HostCommandPayload {
@@ -389,6 +428,10 @@ export interface ClientToServerEvents {
     payload: SelectQuestionPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
+  "giveaway:configure": (
+    payload: ConfigureGiveawayPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
   "media:restart": (
     payload: HostCommandPayload,
     callback: (result: SocketResult<CommandResult>) => void,
@@ -431,6 +474,10 @@ export interface ClientToServerEvents {
   ) => void;
   "timer:skip": (
     payload: HostCommandPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "wager:submit": (
+    payload: SubmitWagerPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
   "player:reconnect": (

@@ -552,6 +552,110 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
             </div>
           </section>
 
+          <section className="rounded-2xl bg-slate-800 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold">Спецмодификаторы</h2>
+                <p className="mt-1 text-sm text-slate-300">
+                  Каждый добавленный блок сработает один раз в случайном месте
+                  игры.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(
+                  [
+                    ["giveaway", "Отдай вопрос"],
+                    ["money", "Операция с деньгами"],
+                    ["invert-score", "Плюс на минус"],
+                    ["mercy", "Проси милостыню"],
+                  ] as const
+                ).map(([kind, label]) => (
+                  <Button
+                    key={kind}
+                    onClick={() => editor.addSpecialModifier(kind)}
+                    variant="surface"
+                  >
+                    + {label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            {(draft.specialModifiers ?? []).length === 0 ? (
+              <p className="mt-4 rounded-xl bg-slate-900/60 p-4 text-sm text-slate-400">
+                В этой викторине спецмодификаторы не настроены.
+              </p>
+            ) : (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {(draft.specialModifiers ?? []).map((modifier, index) => {
+                  const title =
+                    modifier.kind === "giveaway"
+                      ? "Отдай вопрос"
+                      : modifier.kind === "money"
+                        ? "Операция с деньгами"
+                        : modifier.kind === "invert-score"
+                          ? "Плюс на минус"
+                          : "Проси милостыню";
+                  return (
+                    <article
+                      className="rounded-xl border border-slate-600 bg-slate-700 p-4"
+                      key={modifier.id}
+                    >
+                      <header className="flex items-center justify-between gap-2">
+                        <h3 className="font-bold">
+                          {index + 1}. {title}
+                        </h3>
+                        <Button
+                          aria-label={`Удалить модификатор ${index + 1}`}
+                          onClick={() =>
+                            editor.removeSpecialModifier(modifier.id)
+                          }
+                          variant="danger"
+                        >
+                          Удалить
+                        </Button>
+                      </header>
+                      <label className="mt-3 block">
+                        <span className="mb-1 block text-sm text-slate-300">
+                          Текст
+                        </span>
+                        <AutoGrowingTextarea
+                          aria-label={`Текст модификатора ${index + 1}`}
+                          maxLength={quizLimits.specialModifierTextLength}
+                          onChange={(event) =>
+                            editor.updateSpecialModifier(modifier.id, {
+                              text: event.target.value,
+                            })
+                          }
+                          value={modifier.text}
+                        />
+                      </label>
+                      {modifier.kind !== "money" ? null : (
+                        <label className="mt-3 block">
+                          <span className="mb-1 block text-sm text-slate-300">
+                            Изменение баллов
+                          </span>
+                          <Input
+                            aria-label={`Баллы модификатора ${index + 1}`}
+                            max={quizLimits.questionPrice.max}
+                            min={-quizLimits.questionPrice.max}
+                            onChange={(event) =>
+                              editor.updateSpecialModifier(modifier.id, {
+                                delta: Number(event.target.value),
+                              })
+                            }
+                            step={100}
+                            type="number"
+                            value={modifier.delta}
+                          />
+                        </label>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
           <div className="flex flex-wrap justify-end gap-2">
             <Button
               onClick={() => {
@@ -775,27 +879,77 @@ export function QuizEditor({ quizId }: QuizEditorProps) {
                                 open={!isCollapsed("question", question.id)}
                               >
                                 <div className="mt-3 grid gap-3 lg:grid-cols-[8rem_1fr_1fr]">
-                                  <label>
-                                    <span className="mb-1 block text-sm text-slate-300">
-                                      Стоимость
-                                    </span>
-                                    <Input
-                                      aria-label={`Стоимость вопроса ${questionIndex + 1}`}
-                                      min={1}
-                                      onChange={(event) => {
-                                        editor.updateQuestion(
-                                          round.id,
-                                          theme.id,
-                                          question.id,
-                                          {
-                                            price: Number(event.target.value),
-                                          },
-                                        );
-                                      }}
-                                      type="number"
-                                      value={question.price}
-                                    />
-                                  </label>
+                                  <div className="space-y-3">
+                                    <label>
+                                      <span className="mb-1 block text-sm text-slate-300">
+                                        Стоимость
+                                      </span>
+                                      <Input
+                                        aria-label={`Стоимость вопроса ${questionIndex + 1}`}
+                                        min={1}
+                                        onChange={(event) => {
+                                          editor.updateQuestion(
+                                            round.id,
+                                            theme.id,
+                                            question.id,
+                                            {
+                                              price: Number(event.target.value),
+                                            },
+                                          );
+                                        }}
+                                        type="number"
+                                        value={question.price}
+                                      />
+                                    </label>
+                                    <label className="flex items-center gap-2 font-semibold">
+                                      <input
+                                        checked={
+                                          question.wagerLimit !== undefined
+                                        }
+                                        onChange={(event) => {
+                                          editor.setQuestionWagerLimit(
+                                            round.id,
+                                            theme.id,
+                                            question.id,
+                                            event.target.checked
+                                              ? Math.ceil(
+                                                  Math.max(
+                                                    quizLimits.wager.min,
+                                                    question.price,
+                                                  ) / quizLimits.wager.step,
+                                                ) * quizLimits.wager.step
+                                              : undefined,
+                                          );
+                                        }}
+                                        type="checkbox"
+                                      />
+                                      Со ставкой
+                                    </label>
+                                    {question.wagerLimit ===
+                                    undefined ? null : (
+                                      <label>
+                                        <span className="mb-1 block text-sm text-slate-300">
+                                          Максимальная ставка
+                                        </span>
+                                        <Input
+                                          aria-label={`Максимальная ставка вопроса ${questionIndex + 1}`}
+                                          max={quizLimits.wager.max}
+                                          min={quizLimits.wager.min}
+                                          onChange={(event) => {
+                                            editor.setQuestionWagerLimit(
+                                              round.id,
+                                              theme.id,
+                                              question.id,
+                                              Number(event.target.value),
+                                            );
+                                          }}
+                                          step={quizLimits.wager.step}
+                                          type="number"
+                                          value={question.wagerLimit}
+                                        />
+                                      </label>
+                                    )}
+                                  </div>
                                   <label>
                                     <span className="mb-1 block text-sm text-slate-300">
                                       Текст вопроса

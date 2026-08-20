@@ -17,6 +17,7 @@ import {
   changeRoundPayloadSchema,
   checkRoomPayloadSchema,
   confirmScorePayloadSchema,
+  configureGiveawayPayloadSchema,
   createRoomPayloadSchema,
   emptyPayloadSchema,
   hostCommandPayloadSchema,
@@ -29,6 +30,7 @@ import {
   selectAnsweringPlayerPayloadSchema,
   selectQuestionPayloadSchema,
   selectThemePayloadSchema,
+  submitWagerPayloadSchema,
   updatePlayerPayloadSchema,
   updatePlayerTelemetryPayloadSchema,
   userAgentHeaderSchema,
@@ -297,11 +299,13 @@ export function registerSocketHandlers(
           if (phase === "question-intro") {
             const opened = roomManager.completeQuestionIntro(roomCode);
             emitRoomState(io, roomManager, roomCode);
-            scheduleExpiration(
-              roomCode,
-              opened.buzzWindowId,
-              Math.max(0, opened.timer.endsAt - Date.now()),
-            );
+            if (opened !== null) {
+              scheduleExpiration(
+                roomCode,
+                opened.buzzWindowId,
+                Math.max(0, opened.timer.endsAt - Date.now()),
+              );
+            }
           } else {
             roomManager.finishQuestion(roomCode);
             emitRoomState(io, roomManager, roomCode);
@@ -694,10 +698,69 @@ export function registerSocketHandlers(
       }
 
       try {
-        const timer = roomManager.selectQuestion(
+        const selection = roomManager.selectQuestion(
           parsed.data.roomCode,
           parsed.data.hostToken,
           parsed.data.questionId,
+        );
+        if (selection.timer !== null) {
+          scheduleGameTransition(
+            parsed.data.roomCode,
+            "question-intro",
+            selection.timer.endsAt,
+          );
+        } else if (selection.buzzer !== null) {
+          scheduleExpiration(
+            parsed.data.roomCode,
+            selection.buzzer.buzzWindowId,
+            selection.buzzer.timer.durationMs,
+          );
+        }
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("wager:submit", (payload, callback) => {
+      const parsed = parsePayload(submitWagerPayloadSchema, payload);
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      try {
+        const timer = roomManager.submitWager(
+          parsed.data.roomCode,
+          parsed.data.playerToken,
+          parsed.data.wager,
+        );
+        if (timer !== null) {
+          scheduleGameTransition(
+            parsed.data.roomCode,
+            "question-intro",
+            timer.endsAt,
+          );
+        }
+        respondWithSuccess(socket, callback, { completed: true });
+        emitRoomState(io, roomManager, parsed.data.roomCode);
+      } catch (error: unknown) {
+        respondWithError(socket, callback, toSocketError(error));
+      }
+    });
+
+    socket.on("giveaway:configure", (payload, callback) => {
+      const parsed = parsePayload(configureGiveawayPayloadSchema, payload);
+      if (!parsed.success) {
+        respondWithError(socket, callback, parsed.error);
+        return;
+      }
+      try {
+        const timer = roomManager.configureGiveaway(
+          parsed.data.roomCode,
+          parsed.data.hostToken,
+          parsed.data.playerId,
+          parsed.data.wager,
         );
         scheduleGameTransition(
           parsed.data.roomCode,
@@ -837,7 +900,7 @@ export function registerSocketHandlers(
       }
 
       try {
-        roomManager.cancelScoreProposal(
+        const outcome = roomManager.cancelScoreProposal(
           parsed.data.roomCode,
           parsed.data.hostToken,
         );
@@ -847,6 +910,15 @@ export function registerSocketHandlers(
             parsed.data.roomCode,
             room.buzzer.id,
             Math.max(0, room.buzzer.timer.endsAt - Date.now()),
+          );
+        } else if (
+          outcome === "answer-reveal" &&
+          room.session?.getTimer() !== null
+        ) {
+          scheduleGameTransition(
+            parsed.data.roomCode,
+            "answer-reveal",
+            room.session?.getTimer()?.endsAt ?? Date.now(),
           );
         }
         respondWithSuccess(socket, callback, { completed: true });

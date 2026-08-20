@@ -963,3 +963,81 @@ test("аудиовопрос загружается, обрезается и у�
     await hostPage.request.delete(`/api/quizzes/${quizId}`);
   }
 });
+
+test("ставка игрока и денежный модификатор проходят полный игровой цикл", async ({
+  browser,
+  page: hostPage,
+}) => {
+  test.setTimeout(60_000);
+  const quizTitle = `E2E ставки ${Date.now()}`;
+  let quizId: string | null = null;
+  const playerContext = await browser.newContext();
+  const playerPage = await playerContext.newPage();
+
+  try {
+    await hostPage.goto("/editor/new");
+    await hostPage.getByLabel("Название викторины").fill(quizTitle);
+    await hostPage.getByLabel("Название темы 1").fill("Тема ставок");
+    await hostPage.getByLabel("Текст вопроса 1").fill("Вопрос со ставкой");
+    await hostPage.getByLabel("Ответ вопроса 1").fill("Ответ");
+    await hostPage.getByLabel("Задержка перед вопросом").fill("0");
+    await hostPage.getByLabel("Показ ответа").fill("0");
+    await hostPage.getByText("Со ставкой", { exact: true }).click();
+    await hostPage.getByLabel("Максимальная ставка вопроса 1").fill("500");
+    await hostPage
+      .getByRole("button", { name: "+ Операция с деньгами" })
+      .click();
+    await hostPage.getByRole("button", { name: "Сохранить" }).click();
+    await expect(hostPage).toHaveURL(/\/editor\/[0-9a-f-]+$/);
+    quizId = hostPage.url().split("/").at(-1) ?? null;
+    if (quizId === null) throw new Error("Редактор не вернул id викторины");
+
+    await hostPage.goto(`/host?quizId=${quizId}`);
+    await hostPage.getByRole("button", { name: "Создать комнату" }).click();
+    const roomCode = await hostPage.getByTestId("room-code").innerText();
+    await playerPage.goto(`/join/${roomCode}`);
+    await playerPage.getByLabel("Имя игрока").fill("Ставочник");
+    await playerPage.getByRole("button", { name: "Войти в комнату" }).click();
+    await hostPage.getByRole("button", { name: "Начать викторину" }).click();
+
+    await hostPage.getByRole("button", { name: "Тема ставок, 100" }).click();
+    await expect(playerPage.getByLabel("Ставка")).toBeVisible();
+    await playerPage.getByLabel("Ставка").fill("500");
+    await playerPage
+      .getByRole("button", { name: "Подтвердить ставку" })
+      .click();
+    await playerPage.getByRole("button", { name: "НАЖАТЬ" }).click();
+    await hostPage
+      .getByRole("button", { name: /Выбрать Ставочник для ответа/ })
+      .click();
+    await expect(
+      hostPage.getByRole("heading", { name: "Отвечает Ставочник" }),
+    ).toBeVisible();
+    await hostPage.keyboard.press("v");
+    await expect(
+      hostPage.getByRole("heading", { name: "Ставочник · +500 баллов" }),
+    ).toBeVisible();
+    await hostPage.keyboard.press("Enter");
+
+    await expect(
+      hostPage.getByRole("button", {
+        name: "Тема ставок, Модификатор",
+      }),
+    ).toBeVisible();
+    await hostPage
+      .getByRole("button", { name: "Тема ставок, Модификатор" })
+      .click();
+    await playerPage.getByRole("button", { name: "НАЖАТЬ" }).click();
+    await expect(
+      hostPage.getByRole("heading", { name: "Ставочник · +1000 баллов" }),
+    ).toBeVisible();
+    await hostPage.keyboard.press("Enter");
+    await expect(playerPage.getByText("1500", { exact: true })).toBeVisible();
+  } finally {
+    await playerContext.close();
+    await hostPage.goto("/");
+    if (quizId !== null) {
+      await hostPage.request.delete(`/api/quizzes/${quizId}`);
+    }
+  }
+});

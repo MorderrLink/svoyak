@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { quizLimits } from "@/shared/constants/quiz";
 import {
   normalizePlayerName,
   PLAYER_NAME_MAX_LENGTH,
@@ -122,6 +123,21 @@ export const judgeAnswerPayloadSchema = reconnectHostPayloadSchema
 export const selectAnsweringPlayerPayloadSchema = reconnectHostPayloadSchema
   .extend({
     playerId: z.uuid(),
+  })
+  .strict();
+
+export const configureGiveawayPayloadSchema = reconnectHostPayloadSchema
+  .extend({
+    playerId: z.uuid(),
+    wager: z.number().int().min(quizLimits.wager.min).max(quizLimits.wager.max),
+  })
+  .strict();
+
+export const submitWagerPayloadSchema = z
+  .object({
+    playerToken: tokenSchema,
+    roomCode: roomCodeSchema,
+    wager: z.number().int().min(quizLimits.wager.min).max(quizLimits.wager.max),
   })
   .strict();
 

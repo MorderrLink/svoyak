@@ -202,6 +202,46 @@ function DisplayContent({
     );
   }
 
+  if (game.phase === "wagering") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <div>
+          <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
+            Вопрос со ставкой
+          </p>
+          <h1 className="mt-3 text-[clamp(2.5rem,7vw,6rem)] font-black">
+            Игроки делают ставки
+          </h1>
+        </div>
+      </section>
+    );
+  }
+
+  if (game.phase === "giveaway-setup") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <div>
+          <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
+            Спецмодификатор
+          </p>
+          <h1 className="mt-3 text-[clamp(3rem,9vw,8rem)] font-black">
+            Отдай вопрос
+          </h1>
+        </div>
+      </section>
+    );
+  }
+
+  if (game.phase === "modifier-buzzing") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <h1 className="text-[clamp(3rem,10vw,9rem)] font-black text-blue-300">
+          Модификатор
+        </h1>
+      </section>
+    );
+  }
+
   const question = game.activeQuestion;
   if (question === null) return null;
 
@@ -376,7 +416,7 @@ function DisplayBoard({ game }: { game: DisplayGameState }) {
                   data-testid="display-board-price"
                   key={question.id}
                 >
-                  {question.played ? "—" : question.price}
+                  {question.played ? "—" : (question.label ?? question.price)}
                 </div>
               );
             })}

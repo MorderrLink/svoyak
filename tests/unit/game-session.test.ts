@@ -68,19 +68,187 @@ function createQuiz(): QuizConfig {
   };
 }
 
-function createManager(now: () => number = () => 1_000) {
+function createManager(
+  now: () => number = () => 1_000,
+  random: () => number = () => 0,
+) {
   let generatedId = 0;
   return new RoomManager({
     codeGenerator: () => "A7K4",
     idGenerator: () =>
       `00000000-0000-4000-8000-${String(++generatedId).padStart(12, "0")}`,
     now,
+    random,
     tokenGenerator: () =>
       `00000000-0000-4000-8000-${String(++generatedId).padStart(12, "0")}`,
   });
 }
 
 describe("игровая сессия", () => {
+  it("собирает ставки всех игроков и считает ответ по личной ставке", () => {
+    const quiz = createQuiz();
+    quiz.rounds[0]!.themes[0]!.questions[0]!.wagerLimit = 500;
+    const manager = createManager();
+    const room = manager.createRoom(quiz);
+    const anna = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    const boris = manager.addPlayer(room.roomCode, "Борис", "socket-2");
+    manager.adjustPlayerScore(
+      room.roomCode,
+      room.hostToken,
+      anna.playerId,
+      -900,
+    );
+    manager.startSession(room.roomCode, room.hostToken);
+
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      phase: "wagering",
+      wagers: { maximum: 500, totalPlayerCount: 2 },
+    });
+    expect(
+      manager.submitWager(room.roomCode, anna.playerToken, 500),
+    ).toBeNull();
+    expect(
+      manager.getPlayerState(room.roomCode, anna.playerId).wager,
+    ).toMatchObject({ submitted: true, value: 500 });
+    expect(
+      manager.submitWager(room.roomCode, boris.playerToken, 200),
+    ).not.toBeNull();
+
+    const buzzer = manager.completeQuestionIntro(room.roomCode)!;
+    manager.pressBuzzer(room.roomCode, anna.playerToken, buzzer.buzzWindowId);
+    manager.selectAnsweringPlayer(room.roomCode, room.hostToken, anna.playerId);
+    manager.judgeAnswer(room.roomCode, room.hostToken, "incorrect");
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    expect(proposal?.suggestedDelta).toBe(-500);
+  });
+
+  it("случайно назначает режим «Отдай вопрос» и оставляет одного отвечающего", () => {
+    const quiz = createQuiz();
+    quiz.specialModifiers = [
+      {
+        id: "00000000-0000-4000-8000-000000000010",
+        kind: "giveaway",
+        text: "Отдай вопрос",
+      },
+    ];
+    const manager = new RoomManager({
+      codeGenerator: () => "A7K4",
+      idGenerator: () => "00000000-0000-4000-8000-000000000020",
+      now: () => 1_000,
+      random: () => 0,
+      tokenGenerator: () => "00000000-0000-4000-8000-000000000021",
+    });
+    const room = manager.createRoom(quiz);
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+
+    manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe(
+      "giveaway-setup",
+    );
+    manager.configureGiveaway(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+      500,
+    );
+    expect(manager.completeQuestionIntro(room.roomCode)).toBeNull();
+    expect(manager.getHostState(room.roomCode).game).toMatchObject({
+      activeQuestion: { currentPlayerId: player.playerId, price: 500 },
+      phase: "answering",
+    });
+    manager.judgeAnswer(room.roomCode, room.hostToken, "incorrect");
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    expect(proposal?.suggestedDelta).toBe(-500);
+    manager.confirmScore(room.roomCode, room.hostToken, proposal!.id, -500);
+    expect(manager.getHostState(room.roomCode).game?.phase).toBe(
+      "answer-reveal",
+    );
+    expect(
+      manager.getPlayerState(room.roomCode, player.playerId).buzzer.status,
+    ).toBe("answered-incorrectly");
+  });
+
+  it("генерирует денежный модификатор отдельной клеткой и отдаёт первому нажавшему", () => {
+    const quiz = createQuiz();
+    const modifierId = "00000000-0000-4000-8000-000000000010";
+    quiz.specialModifiers = [
+      {
+        delta: 1_000,
+        id: modifierId,
+        kind: "money",
+        text: "Держи косарь!",
+      },
+    ];
+    const manager = createManager();
+    const room = manager.createRoom(quiz);
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.startSession(room.roomCode, room.hostToken);
+
+    const modifierCell = manager
+      .getHostState(room.roomCode)
+      .game?.board.flatMap((theme) => theme.questions)
+      .find((question) => question.id === modifierId);
+    expect(modifierCell).toMatchObject({ label: "Модификатор", price: 0 });
+    const selection = manager.selectQuestion(
+      room.roomCode,
+      room.hostToken,
+      modifierId,
+    );
+    expect(selection.buzzer).not.toBeNull();
+    manager.pressBuzzer(
+      room.roomCode,
+      player.playerToken,
+      selection.buzzer!.buzzWindowId,
+    );
+    const proposal = manager.getHostState(room.roomCode).game?.scoreProposal;
+    expect(proposal).toMatchObject({
+      playerId: player.playerId,
+      suggestedDelta: 1_000,
+    });
+    manager.confirmScore(room.roomCode, room.hostToken, proposal!.id, 1_000);
+    expect(manager.getPlayerState(room.roomCode, player.playerId).score).toBe(
+      1_000,
+    );
+  });
+
+  it("для «Плюс на минус» предлагает изменение, которое меняет знак счёта", () => {
+    const quiz = createQuiz();
+    const modifierId = "00000000-0000-4000-8000-000000000010";
+    quiz.specialModifiers = [
+      {
+        id: modifierId,
+        kind: "invert-score",
+        text: "Плюс на минус",
+      },
+    ];
+    const manager = createManager();
+    const room = manager.createRoom(quiz);
+    const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
+    manager.adjustPlayerScore(
+      room.roomCode,
+      room.hostToken,
+      player.playerId,
+      300,
+    );
+    manager.startSession(room.roomCode, room.hostToken);
+    const selection = manager.selectQuestion(
+      room.roomCode,
+      room.hostToken,
+      modifierId,
+    );
+    manager.pressBuzzer(
+      room.roomCode,
+      player.playerToken,
+      selection.buzzer!.buzzWindowId,
+    );
+
+    expect(
+      manager.getHostState(room.roomCode).game?.scoreProposal?.suggestedDelta,
+    ).toBe(-600);
+  });
+
   it("использует независимый снимок викторины", () => {
     const quiz = createQuiz();
     const manager = createManager();
@@ -194,7 +362,7 @@ describe("игровая сессия", () => {
     const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
     manager.startSession(room.roomCode, room.hostToken);
     manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
-    const buzzer = manager.completeQuestionIntro(room.roomCode);
+    const buzzer = manager.completeQuestionIntro(room.roomCode)!;
     manager.pressBuzzer(room.roomCode, player.playerToken, buzzer.buzzWindowId);
     manager.selectAnsweringPlayer(
       room.roomCode,
@@ -261,7 +429,7 @@ describe("игровая сессия", () => {
     const second = manager.addPlayer(room.roomCode, "Борис", "socket-2");
     manager.startSession(room.roomCode, room.hostToken);
     manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
-    const buzzer = manager.completeQuestionIntro(room.roomCode);
+    const buzzer = manager.completeQuestionIntro(room.roomCode)!;
 
     manager.pressBuzzer(room.roomCode, first.playerToken, buzzer.buzzWindowId);
     manager.pressBuzzer(room.roomCode, second.playerToken, buzzer.buzzWindowId);
@@ -380,7 +548,7 @@ describe("игровая сессия", () => {
     const player = manager.addPlayer(room.roomCode, "Анна", "socket-1");
     manager.startSession(room.roomCode, room.hostToken);
     manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
-    const firstWindow = manager.completeQuestionIntro(room.roomCode);
+    const firstWindow = manager.completeQuestionIntro(room.roomCode)!;
     manager.pressBuzzer(
       room.roomCode,
       player.playerToken,
@@ -405,7 +573,7 @@ describe("игровая сессия", () => {
     const second = manager.addPlayer(room.roomCode, "Борис", "socket-2");
     manager.startSession(room.roomCode, room.hostToken);
     manager.selectQuestion(room.roomCode, room.hostToken, firstQuestionId);
-    const firstWindow = manager.completeQuestionIntro(room.roomCode);
+    const firstWindow = manager.completeQuestionIntro(room.roomCode)!;
     manager.pressBuzzer(
       room.roomCode,
       first.playerToken,
@@ -490,7 +658,7 @@ describe("игровая сессия", () => {
       "Секретная подсказка ведущему",
     );
 
-    const buzzer = manager.completeQuestionIntro(room.roomCode);
+    const buzzer = manager.completeQuestionIntro(room.roomCode)!;
     const questionState = manager.getDisplayState(room.roomCode);
     expect(questionState.game?.activeQuestion).toMatchObject({
       answer: null,

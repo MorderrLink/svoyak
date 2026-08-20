@@ -31,6 +31,12 @@ export const quizLimits = {
     max: 1_000_000,
     min: 1,
   },
+  specialModifierTextLength: 2_000,
+  wager: {
+    max: 1_000_000,
+    min: 100,
+    step: 100,
+  },
   questionTextLength: 5_000,
   slugLength: 100,
   themeDescriptionLength: 5_000,

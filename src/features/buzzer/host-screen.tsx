@@ -297,6 +297,23 @@ export function HostScreen({ roomCode }: HostScreenProps) {
     );
   };
 
+  const configureGiveaway = (playerId: string, wager: number) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "giveaway:configure",
+      {
+        hostToken: session.hostToken,
+        playerId,
+        roomCode: session.roomCode,
+        wager,
+      },
+      (result) => {
+        if (!result.ok) setError(result.error.message);
+      },
+    );
+  };
+
   const changeRound = (roundIndex: number) => {
     const socket = socketRef.current;
     if (socket === null || session === null) return;
@@ -628,6 +645,39 @@ export function HostScreen({ roomCode }: HostScreenProps) {
               description={game.activeThemeExplanation?.description ?? ""}
               title={game.activeThemeExplanation?.title ?? "Пояснение темы"}
             />
+          ) : game.phase === "wagering" ? (
+            <section className="grid min-h-80 place-items-center text-center">
+              <div>
+                <p className="text-lg font-semibold text-blue-300">
+                  Вопрос со ставкой
+                </p>
+                <h2 className="mt-2 text-4xl font-black">
+                  Игроки делают ставки
+                </h2>
+                <p className="mt-4 text-xl text-slate-300">
+                  Получено: {game.wagers?.submittedPlayerIds.length ?? 0} из{" "}
+                  {game.wagers?.totalPlayerCount ?? 0}
+                </p>
+                <p className="mt-2 text-sm text-slate-400">
+                  Максимальная ставка: {game.wagers?.maximum ?? 0}
+                </p>
+              </div>
+            </section>
+          ) : game.phase === "giveaway-setup" ? (
+            <GiveawaySetup
+              onConfirm={configureGiveaway}
+              players={roomState?.players ?? []}
+              text={activeQuestion?.specialModifier?.text ?? "Отдай вопрос"}
+            />
+          ) : game.phase === "modifier-buzzing" ? (
+            <section>
+              <PhaseCard eyebrow="Спецмодификатор" title="Кто нажмёт первым?" />
+              {roomState?.buzzer.closeReason === "expired" ? (
+                <div className="flex justify-center">
+                  <Button onClick={reopenBuzzer}>Повторить окно нажатия</Button>
+                </div>
+              ) : null}
+            </section>
           ) : game.phase === "question-intro" ? (
             <PhaseCard
               eyebrow={`Вопрос за ${activeQuestion?.price ?? ""}`}
@@ -1018,7 +1068,7 @@ function HostBoard({
               />
             ) : (
               <Button
-                aria-label={`${theme.title}, ${question.price}`}
+                aria-label={`${theme.title}, ${question.label ?? question.price}`}
                 className="min-h-16 text-xl"
                 data-testid="host-board-price"
                 disabled={question.played}
@@ -1028,7 +1078,7 @@ function HostBoard({
                 }}
                 variant={question.played ? "secondary" : "primary"}
               >
-                {question.played ? "—" : question.price}
+                {question.played ? "—" : (question.label ?? question.price)}
               </Button>
             );
           })}
@@ -1163,6 +1213,68 @@ function PhaseCard({ eyebrow, title }: { eyebrow: string; title: string }) {
         <p className="text-xl text-blue-300">{eyebrow}</p>
         <h2 className="mt-3 text-5xl font-bold">{title}</h2>
       </div>
+    </section>
+  );
+}
+
+function GiveawaySetup({
+  onConfirm,
+  players,
+  text,
+}: {
+  onConfirm: (playerId: string, wager: number) => void;
+  players: HostPlayer[];
+  text: string;
+}) {
+  const [playerId, setPlayerId] = useState(players[0]?.id ?? "");
+  const [wager, setWager] = useState(100);
+
+  return (
+    <section className="mx-auto max-w-2xl rounded-2xl bg-slate-800 p-6">
+      <p className="text-sm font-semibold text-blue-300">Спецмодификатор</p>
+      <h2 className="mt-1 text-3xl font-black">{text}</h2>
+      <p className="mt-3 text-slate-300">
+        Выберите получателя вопроса и введите названную им ставку.
+      </p>
+      <label className="mt-5 block">
+        <span className="mb-1 block text-sm text-slate-300">Отвечающий</span>
+        <select
+          aria-label="Получатель вопроса"
+          className="min-h-11 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100"
+          onChange={(event) => setPlayerId(event.target.value)}
+          value={playerId}
+        >
+          {players.map((player) => (
+            <option key={player.id} value={player.id}>
+              {player.name} · {player.score}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="mt-3 block">
+        <span className="mb-1 block text-sm text-slate-300">Ставка</span>
+        <Input
+          aria-label="Ставка отданного вопроса"
+          max={1_000_000}
+          min={100}
+          onChange={(event) => setWager(Number(event.target.value))}
+          step={100}
+          type="number"
+          value={wager}
+        />
+      </label>
+      <Button
+        className="mt-5 w-full"
+        disabled={
+          playerId === "" ||
+          wager < 100 ||
+          wager > 1_000_000 ||
+          wager % 100 !== 0
+        }
+        onClick={() => onConfirm(playerId, wager)}
+      >
+        Открыть вопрос
+      </Button>
     </section>
   );
 }
