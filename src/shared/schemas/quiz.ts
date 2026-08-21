@@ -61,31 +61,123 @@ export const quizImageSchema = z
   })
   .strict();
 
+const quizMediaBaseSchema = z.object({
+  durationMs: z.number().int().positive().max(quizLimits.mediaDurationMs),
+  path: z
+    .string()
+    .trim()
+    .regex(
+      /^assets\/[a-z0-9]+(?:-[a-z0-9]+)*\/media\/[a-zA-Z0-9._-]+$/,
+      "Некорректный путь медиафайла",
+    ),
+  trimEndMs: z.number().int().positive().max(quizLimits.mediaDurationMs),
+  trimStartMs: z.number().int().nonnegative().max(quizLimits.mediaDurationMs),
+});
+
+export const quizAudioSchema = quizMediaBaseSchema
+  .extend({
+    kind: z.literal("audio"),
+    mimeType: z.literal("audio/webm"),
+    waveform: z
+      .array(z.number().min(0).max(1))
+      .length(quizLimits.mediaWaveformSamples),
+  })
+  .strict()
+  .superRefine((media, context) => {
+    if (!media.path.endsWith(".webm")) {
+      context.addIssue({
+        code: "custom",
+        message: "Аудио должно иметь расширение .webm",
+        path: ["path"],
+      });
+    }
+    if (
+      media.trimStartMs >= media.trimEndMs ||
+      media.trimEndMs > media.durationMs
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Некорректные границы обрезки аудио",
+        path: ["trimEndMs"],
+      });
+    }
+  });
+
+export const quizVideoSchema = quizMediaBaseSchema
+  .extend({
+    kind: z.literal("video"),
+    mimeType: z.literal("video/mp4"),
+  })
+  .strict()
+  .superRefine((media, context) => {
+    if (!media.path.endsWith(".mp4")) {
+      context.addIssue({
+        code: "custom",
+        message: "Видео должно иметь расширение .mp4",
+        path: ["path"],
+      });
+    }
+    if (
+      media.trimStartMs >= media.trimEndMs ||
+      media.trimEndMs > media.durationMs
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Некорректные границы обрезки видео",
+        path: ["trimEndMs"],
+      });
+    }
+  });
+
+export const quizMediaSchema = z.discriminatedUnion("kind", [
+  quizAudioSchema,
+  quizVideoSchema,
+]);
+
 export const questionContentSchema = z
   .object({
     image: quizImageSchema.optional(),
+    media: quizMediaSchema.optional(),
     text: z.string().trim().max(quizLimits.questionTextLength).optional(),
   })
   .strict()
   .superRefine((content, context) => {
-    if ((content.text?.length ?? 0) === 0 && content.image === undefined) {
+    if (
+      (content.text?.length ?? 0) === 0 &&
+      content.image === undefined &&
+      content.media === undefined
+    ) {
       context.addIssue({
         code: "custom",
-        message: "Добавьте текст или изображение вопроса",
+        message: "Добавьте текст, изображение, аудио или видео вопроса",
         path: ["text"],
+      });
+    }
+    if (content.image !== undefined && content.media !== undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Вопрос может содержать только один тип медиа",
+        path: ["media"],
       });
     }
   });
 
 export const textQuestionContentSchema = questionContentSchema;
 
+const wagerLimitSchema = z
+  .number()
+  .int()
+  .min(quizLimits.wager.min)
+  .max(quizLimits.wager.max)
+  .refine(
+    (value) => value % quizLimits.wager.step === 0,
+    `Максимальная ставка должна быть кратна ${quizLimits.wager.step}`,
+  );
+
 export const quizQuestionSchema = z
   .object({
-    answer: z
-      .string()
-      .trim()
-      .min(1, "Введите правильный ответ")
-      .max(quizLimits.answerLength),
+    answer: z.string().trim().max(quizLimits.answerLength),
+    answerImage: quizImageSchema.optional(),
     content: questionContentSchema,
     hostComment: z
       .string()
@@ -99,11 +191,64 @@ export const quizQuestionSchema = z
       .int()
       .min(quizLimits.questionPrice.min)
       .max(quizLimits.questionPrice.max),
+    wagerLimit: wagerLimitSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((question, context) => {
+    if (question.answer.length === 0 && question.answerImage === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "Добавьте текст или изображение правильного ответа",
+        path: ["answer"],
+      });
+    }
+  });
+
+const specialModifierBaseSchema = z.object({
+  id: entityIdSchema,
+  text: z
+    .string()
+    .trim()
+    .min(1, "Введите текст модификатора")
+    .max(quizLimits.specialModifierTextLength),
+});
+
+export const quizSpecialModifierSchema = z.discriminatedUnion("kind", [
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("giveaway"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      delta: z
+        .number()
+        .int()
+        .min(-quizLimits.questionPrice.max)
+        .max(quizLimits.questionPrice.max),
+      kind: z.literal("money"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("invert-score"),
+    })
+    .strict(),
+  specialModifierBaseSchema
+    .extend({
+      kind: z.literal("mercy"),
+    })
+    .strict(),
+]);
 
 export const quizThemeSchema = z
   .object({
+    description: z
+      .string()
+      .trim()
+      .min(1, "Пустое пояснение следует удалить")
+      .max(quizLimits.themeDescriptionLength)
+      .optional(),
     id: entityIdSchema,
     order: orderSchema,
     questions: z
@@ -115,24 +260,7 @@ export const quizThemeSchema = z
       .min(1, "Введите название темы")
       .max(quizLimits.themeTitleLength),
   })
-  .strict()
-  .superRefine((theme, context) => {
-    const priceIndexes = new Map<number, number>();
-
-    theme.questions.forEach((question, questionIndex) => {
-      const previousIndex = priceIndexes.get(question.price);
-
-      if (previousIndex !== undefined) {
-        context.addIssue({
-          code: "custom",
-          message: `Стоимость ${question.price} уже используется в этой теме`,
-          path: ["questions", questionIndex, "price"],
-        });
-      } else {
-        priceIndexes.set(question.price, questionIndex);
-      }
-    });
-  });
+  .strict();
 
 export const quizRoundSchema = z
   .object({
@@ -161,6 +289,7 @@ export const quizConfigSchema = z
     rounds: z.array(quizRoundSchema).min(1, "Добавьте хотя бы один раунд"),
     schemaVersion: z.literal(QUIZ_SCHEMA_VERSION),
     settings: quizSettingsSchema,
+    specialModifiers: z.array(quizSpecialModifierSchema).optional(),
     slug: z
       .string()
       .min(1)
@@ -205,6 +334,13 @@ export const quizConfigSchema = z
     };
 
     registerIdentifier(quiz.id, ["id"]);
+    quiz.specialModifiers?.forEach((modifier, modifierIndex) => {
+      registerIdentifier(modifier.id, [
+        "specialModifiers",
+        modifierIndex,
+        "id",
+      ]);
+    });
     quiz.rounds.forEach((round, roundIndex) => {
       registerIdentifier(round.id, ["rounds", roundIndex, "id"]);
 
@@ -242,14 +378,39 @@ export const quizConfigSchema = z
     quiz.rounds.forEach((round, roundIndex) => {
       round.themes.forEach((theme, themeIndex) => {
         theme.questions.forEach((question, questionIndex) => {
-          const imagePath = question.content.image?.path;
+          for (const [fieldPath, imagePath] of [
+            [["content", "image"], question.content.image?.path],
+            [["answerImage"], question.answerImage?.path],
+          ] as const) {
+            if (
+              imagePath !== undefined &&
+              !imagePath.startsWith(`assets/${quiz.slug}/images/`)
+            ) {
+              context.addIssue({
+                code: "custom",
+                message: "Путь изображения не соответствует slug викторины",
+                path: [
+                  "rounds",
+                  roundIndex,
+                  "themes",
+                  themeIndex,
+                  "questions",
+                  questionIndex,
+                  ...fieldPath,
+                  "path",
+                ],
+              });
+            }
+          }
+
+          const mediaPath = question.content.media?.path;
           if (
-            imagePath !== undefined &&
-            !imagePath.startsWith(`assets/${quiz.slug}/images/`)
+            mediaPath !== undefined &&
+            !mediaPath.startsWith(`assets/${quiz.slug}/media/`)
           ) {
             context.addIssue({
               code: "custom",
-              message: "Путь изображения не соответствует slug викторины",
+              message: "Путь медиафайла не соответствует slug викторины",
               path: [
                 "rounds",
                 roundIndex,
@@ -258,7 +419,7 @@ export const quizConfigSchema = z
                 "questions",
                 questionIndex,
                 "content",
-                "image",
+                "media",
                 "path",
               ],
             });

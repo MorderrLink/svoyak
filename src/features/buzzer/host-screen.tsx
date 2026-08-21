@@ -4,12 +4,14 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { BottomProgress } from "@/components/bottom-progress";
 import { Button } from "@/components/button";
+import { Dialog } from "@/components/dialog";
 import { ErrorMessage } from "@/components/error-message";
 import { Input } from "@/components/input";
+import { QuestionMediaPlayer } from "@/components/question-media-player";
 import { ScrollArea } from "@/components/scroll-area";
 import { listQuizzes } from "@/shared/api/quizzes";
 import { getQuizAssetUrl } from "@/shared/api/quizzes";
@@ -18,11 +20,13 @@ import type {
   AnswerJudgement,
   CreateRoomResult,
   GameBoardTheme,
+  HostPlayer,
   HostRoomState,
   ScoreChangeProposal,
   SocketError,
 } from "@/shared/contracts/socket";
-import { hostSessionSchema } from "@/shared/schemas/socket";
+import { PLAYER_NAME_MAX_LENGTH } from "@/shared/player/player-name";
+import { hostSessionSchema, roomNameSchema } from "@/shared/schemas/socket";
 import { createClientSocket } from "@/shared/socket/client";
 import type { ApplicationClientSocket } from "@/shared/socket/client";
 import type { QuizSummary } from "@/shared/types/quiz";
@@ -68,6 +72,9 @@ export function HostScreen({ roomCode }: HostScreenProps) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadingQuizzes, setLoadingQuizzes] = useState(true);
+  const [manualScorePlayerId, setManualScorePlayerId] = useState<string | null>(
+    null,
+  );
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [quizzes, setQuizzes] = useState<QuizSummary[]>([]);
   const [roomState, setRoomState] = useState<HostRoomState | null>(null);
@@ -135,6 +142,10 @@ export function HostScreen({ roomCode }: HostScreenProps) {
             window.localStorage.removeItem(hostSessionStorageKey);
             setSession(null);
             setRoomState(null);
+            if (result.error.code === "ROOM_NOT_FOUND") {
+              router.replace("/");
+              return;
+            }
             setError(getErrorMessage(result.error));
           }
         },
@@ -145,6 +156,10 @@ export function HostScreen({ roomCode }: HostScreenProps) {
     });
     socket.on("host:state", setRoomState);
     socket.on("error", (socketError) => {
+      if (socketError.code === "ROOM_NOT_FOUND") {
+        router.replace("/");
+        return;
+      }
       setError(getErrorMessage(socketError));
     });
     socket.connect();
@@ -154,9 +169,50 @@ export function HostScreen({ roomCode }: HostScreenProps) {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [roomCode]);
+  }, [roomCode, router]);
 
   const proposal = roomState?.game?.scoreProposal ?? null;
+  const activeTimer = roomState?.game?.timer ?? roomState?.buzzer.timer ?? null;
+  const canSkipCurrentPhase =
+    activeTimer !== null || roomState?.game?.phase === "theme-explanation";
+
+  useEffect(() => {
+    if (!canSkipCurrentPhase || session === null) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.code !== "Space" ||
+        event.repeat ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLSelectElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      socketRef.current?.emit(
+        "timer:skip",
+        {
+          hostToken: session.hostToken,
+          roomCode: session.roomCode,
+        },
+        (result) => {
+          if (!result.ok) setError(result.error.message);
+        },
+      );
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [canSkipCurrentPhase, session]);
 
   const joinUrl = useMemo(() => {
     if (session === null || selectedBaseUrl === "") return null;
@@ -207,7 +263,12 @@ export function HostScreen({ roomCode }: HostScreenProps) {
 
   const command = (
     event:
-      "question:finish" | "score:cancel" | "session:finish" | "session:start",
+      | "media:restart"
+      | "media:stop"
+      | "question:finish"
+      | "score:cancel"
+      | "session:finish"
+      | "session:start",
   ) => {
     const socket = socketRef.current;
     if (socket === null || session === null) return;
@@ -236,6 +297,39 @@ export function HostScreen({ roomCode }: HostScreenProps) {
     );
   };
 
+  const configureGiveaway = (playerId: string, wager: number) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "giveaway:configure",
+      {
+        hostToken: session.hostToken,
+        playerId,
+        roomCode: session.roomCode,
+        wager,
+      },
+      (result) => {
+        if (!result.ok) setError(result.error.message);
+      },
+    );
+  };
+
+  const changeRound = (roundIndex: number) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "round:change",
+      {
+        hostToken: session.hostToken,
+        roomCode: session.roomCode,
+        roundIndex,
+      },
+      (result) => {
+        if (!result.ok) setError(result.error.message);
+      },
+    );
+  };
+
   const judge = (judgement: AnswerJudgement) => {
     const socket = socketRef.current;
     if (socket === null || session === null) return;
@@ -244,6 +338,22 @@ export function HostScreen({ roomCode }: HostScreenProps) {
       {
         hostToken: session.hostToken,
         judgement,
+        roomCode: session.roomCode,
+      },
+      (result) => {
+        if (!result.ok) setError(result.error.message);
+      },
+    );
+  };
+
+  const selectAnsweringPlayer = (playerId: string) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "answer:select",
+      {
+        hostToken: session.hostToken,
+        playerId,
         roomCode: session.roomCode,
       },
       (result) => {
@@ -278,6 +388,44 @@ export function HostScreen({ roomCode }: HostScreenProps) {
         hostToken: session.hostToken,
         proposalId,
         roomCode: session.roomCode,
+      },
+      (result) => {
+        if (!result.ok) setError(result.error.message);
+      },
+    );
+  };
+
+  const updatePlayer = (playerId: string, name: string, delta: number) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "player:update",
+      {
+        delta,
+        hostToken: session.hostToken,
+        name,
+        playerId,
+        roomCode: session.roomCode,
+      },
+      (result) => {
+        if (!result.ok) {
+          setError(result.error.message);
+          return;
+        }
+        setManualScorePlayerId(null);
+      },
+    );
+  };
+
+  const explainTheme = (themeId: string) => {
+    const socket = socketRef.current;
+    if (socket === null || session === null) return;
+    socket.emit(
+      "theme:explain",
+      {
+        hostToken: session.hostToken,
+        roomCode: session.roomCode,
+        themeId,
       },
       (result) => {
         if (!result.ok) setError(result.error.message);
@@ -372,10 +520,25 @@ export function HostScreen({ roomCode }: HostScreenProps) {
 
   const game = roomState?.game ?? null;
   const activeQuestion = game?.activeQuestion ?? null;
+  const canAdjustPlayerScore =
+    game === null ||
+    game.phase === "board" ||
+    game.phase === "round-finished" ||
+    game.phase === "game-finished";
+  const manualScorePlayer =
+    roomState?.players.find((player) => player.id === manualScorePlayerId) ??
+    null;
 
   return (
-    <main className="relative grid h-full grid-cols-1 gap-4 overflow-hidden bg-slate-950 p-4 text-white lg:grid-cols-[minmax(0,1fr)_20rem]">
-      <section className="flex min-h-0 flex-col rounded-2xl bg-slate-900 p-5">
+    <main
+      className={[
+        "relative h-full overflow-hidden bg-slate-950 p-4 text-white",
+        game === null
+          ? "flex"
+          : "grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]",
+      ].join(" ")}
+    >
+      <section className="flex min-h-0 w-full flex-col rounded-2xl bg-slate-900 p-5">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-sm text-blue-300">
@@ -414,6 +577,14 @@ export function HostScreen({ roomCode }: HostScreenProps) {
           >
             Открыть публичный экран
           </Button>
+          <Button
+            onClick={() => {
+              router.push("/");
+            }}
+            variant="secondary"
+          >
+            На главную
+          </Button>
         </header>
 
         {error === null ? null : (
@@ -422,32 +593,90 @@ export function HostScreen({ roomCode }: HostScreenProps) {
 
         <ScrollArea className="mt-4 flex-1">
           {game === null ? (
-            <section className="grid gap-5 lg:grid-cols-2">
-              <div>
-                <h2 className="text-2xl font-semibold">Лобби</h2>
-                <p className="mt-2 text-slate-300">
-                  Подключите игроков и запустите сессию.
-                </p>
-                <Button
-                  className="mt-5"
-                  disabled={(roomState?.players.length ?? 0) === 0}
-                  onClick={() => {
-                    command("session:start");
-                  }}
-                >
-                  Начать викторину
-                </Button>
-              </div>
-              <PlayerList players={roomState?.players ?? []} />
-            </section>
+            <Lobby
+              applicationUrls={session.applicationUrls}
+              joinUrl={joinUrl}
+              onChangeBaseUrl={setSelectedBaseUrl}
+              onSelectPlayer={setManualScorePlayerId}
+              onStart={() => {
+                command("session:start");
+              }}
+              players={roomState?.players ?? []}
+              qrCode={qrCode}
+              selectedBaseUrl={selectedBaseUrl}
+            />
           ) : game.phase === "board" ? (
             <section>
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-2xl font-semibold">
                   Раунд {game.currentRoundIndex + 1} из {game.roundCount}
                 </h2>
+                <div className="flex gap-2">
+                  <Button
+                    aria-label="Предыдущий раунд"
+                    disabled={game.currentRoundIndex === 0}
+                    onClick={() => {
+                      changeRound(game.currentRoundIndex - 1);
+                    }}
+                    variant="secondary"
+                  >
+                    ← Назад
+                  </Button>
+                  <Button
+                    aria-label="Следующий раунд"
+                    disabled={game.currentRoundIndex + 1 >= game.roundCount}
+                    onClick={() => {
+                      changeRound(game.currentRoundIndex + 1);
+                    }}
+                    variant="secondary"
+                  >
+                    Вперёд →
+                  </Button>
+                </div>
               </div>
-              <HostBoard board={game.board} onSelect={selectQuestion} />
+              <HostBoard
+                board={game.board}
+                onExplain={explainTheme}
+                onSelect={selectQuestion}
+              />
+            </section>
+          ) : game.phase === "theme-explanation" ? (
+            <ThemeExplanationCard
+              description={game.activeThemeExplanation?.description ?? ""}
+              title={game.activeThemeExplanation?.title ?? "Пояснение темы"}
+            />
+          ) : game.phase === "wagering" ? (
+            <section className="grid min-h-80 place-items-center text-center">
+              <div>
+                <p className="text-lg font-semibold text-blue-300">
+                  Вопрос со ставкой
+                </p>
+                <h2 className="mt-2 text-4xl font-black">
+                  Игроки делают ставки
+                </h2>
+                <p className="mt-4 text-xl text-slate-300">
+                  Получено: {game.wagers?.submittedPlayerIds.length ?? 0} из{" "}
+                  {game.wagers?.totalPlayerCount ?? 0}
+                </p>
+                <p className="mt-2 text-sm text-slate-400">
+                  Максимальная ставка: {game.wagers?.maximum ?? 0}
+                </p>
+              </div>
+            </section>
+          ) : game.phase === "giveaway-setup" ? (
+            <GiveawaySetup
+              onConfirm={configureGiveaway}
+              players={roomState?.players ?? []}
+              text={activeQuestion?.specialModifier?.text ?? "Отдай вопрос"}
+            />
+          ) : game.phase === "modifier-buzzing" ? (
+            <section>
+              <PhaseCard eyebrow="Спецмодификатор" title="Кто нажмёт первым?" />
+              {roomState?.buzzer.closeReason === "expired" ? (
+                <div className="flex justify-center">
+                  <Button onClick={reopenBuzzer}>Повторить окно нажатия</Button>
+                </div>
+              ) : null}
             </section>
           ) : game.phase === "question-intro" ? (
             <PhaseCard
@@ -493,9 +722,52 @@ export function HostScreen({ roomCode }: HostScreenProps) {
                   width={1280}
                 />
               )}
+              {activeQuestion?.media === null ||
+              activeQuestion?.media === undefined ||
+              game.phase === "answer-reveal" ? null : (
+                <div className="mt-5 flex max-h-[44vh] min-h-52 flex-col rounded-xl bg-slate-950/70 p-4">
+                  <QuestionMediaPlayer
+                    media={activeQuestion.media}
+                    playback={game.mediaPlayback}
+                  />
+                  <div className="mt-3 flex justify-center gap-3">
+                    <Button
+                      onClick={() => {
+                        command("media:restart");
+                      }}
+                    >
+                      ▶ С начала
+                    </Button>
+                    <Button
+                      disabled={game.mediaPlayback === null}
+                      onClick={() => {
+                        command("media:stop");
+                      }}
+                      variant="secondary"
+                    >
+                      {game.mediaPlayback?.playing === true
+                        ? "⏸ Пауза"
+                        : "▶ Продолжить"}
+                    </Button>
+                  </div>
+                </div>
+              )}
               <div className="mt-5 rounded-xl bg-slate-950/70 p-4">
                 <p className="text-xs text-slate-400">Правильный ответ</p>
-                <p className="mt-1 text-xl">{activeQuestion?.answer}</p>
+                {activeQuestion?.answer === "" ? null : (
+                  <p className="mt-1 text-xl">{activeQuestion?.answer}</p>
+                )}
+                {activeQuestion?.answerImage === null ||
+                activeQuestion?.answerImage === undefined ? null : (
+                  <Image
+                    alt={activeQuestion.answerImage.alt ?? "Изображение ответа"}
+                    className="mt-3 max-h-[28vh] w-full rounded-xl object-contain"
+                    height={540}
+                    src={getQuizAssetUrl(activeQuestion.answerImage.path)}
+                    unoptimized
+                    width={960}
+                  />
+                )}
                 {activeQuestion?.hostComment === null ? null : (
                   <p className="mt-3 text-sm text-slate-300">
                     {activeQuestion?.hostComment}
@@ -503,30 +775,27 @@ export function HostScreen({ roomCode }: HostScreenProps) {
                 )}
               </div>
 
+              {game.phase === "answer-reveal" ? null : (
+                <QuestionPlayerGrid
+                  attemptedPlayerIds={activeQuestion?.attemptedPlayerIds ?? []}
+                  onSelect={selectAnsweringPlayer}
+                  players={roomState?.players ?? []}
+                  selectable={game.phase === "buzzing"}
+                />
+              )}
+
               {game.phase === "buzzing" ? (
                 <div className="mt-5 flex flex-wrap gap-2">
-                  <p className="w-full text-lg">Ждём нажатия игроков…</p>
-                  {activeQuestion?.attemptedPlayerIds.length === 0 ? null : (
-                    <p className="w-full text-sm text-slate-400">
-                      Уже отвечали:{" "}
-                      {activeQuestion?.attemptedPlayerIds
-                        .map(
-                          (playerId) =>
-                            roomState?.players.find(
-                              (player) => player.id === playerId,
-                            )?.name,
-                        )
-                        .filter((name) => name !== undefined)
-                        .join(", ")}
-                    </p>
-                  )}
+                  <p className="w-full text-lg">
+                    Выберите нажавшего игрока, который будет отвечать.
+                  </p>
                   <Button
                     onClick={() => {
                       command("question:finish");
                     }}
                     variant="secondary"
                   >
-                    Никто не ответил — раскрыть ответ
+                    Никто не ответил
                   </Button>
                   {roomState?.buzzer.closeReason === "expired" ? (
                     <Button onClick={reopenBuzzer}>
@@ -535,31 +804,14 @@ export function HostScreen({ roomCode }: HostScreenProps) {
                   ) : null}
                 </div>
               ) : game.phase === "answering" ? (
-                <div className="mt-5">
-                  <p className="text-lg">
-                    Отвечает:{" "}
-                    <strong>
-                      {
-                        roomState?.players.find(
-                          (player) =>
-                            player.id === activeQuestion?.currentPlayerId,
-                        )?.name
-                      }
-                    </strong>
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button onClick={() => judge("correct")}>Верно</Button>
-                    <Button onClick={() => judge("incorrect")} variant="danger">
-                      Неверно
-                    </Button>
-                    <Button
-                      onClick={() => judge("timeout")}
-                      variant="secondary"
-                    >
-                      Не успел
-                    </Button>
-                  </div>
-                </div>
+                <AnswerDecisionDialog
+                  onJudge={judge}
+                  playerName={
+                    roomState?.players.find(
+                      (player) => player.id === activeQuestion?.currentPlayerId,
+                    )?.name ?? "Игрок"
+                  }
+                />
               ) : game.phase === "score-confirmation" && proposal !== null ? (
                 <ScoreConfirmation
                   key={proposal.id}
@@ -579,26 +831,87 @@ export function HostScreen({ roomCode }: HostScreenProps) {
         </ScrollArea>
       </section>
 
-      <aside className="min-h-0 overflow-auto rounded-2xl bg-white p-4 text-slate-950">
-        <h2 className="font-semibold">Подключение игроков</h2>
-        <select
-          aria-label="Адрес локальной сети"
-          className="mt-3 min-h-11 w-full rounded-lg border border-slate-300 px-2"
-          onChange={(event) => {
-            setSelectedBaseUrl(event.target.value);
+      {game === null ? null : (
+        <aside className="min-h-0 overflow-auto rounded-2xl bg-slate-900 p-5 text-white">
+          <GamePlayerPanel
+            canAdjustScore={canAdjustPlayerScore}
+            onSelectPlayer={setManualScorePlayerId}
+            players={roomState?.players ?? []}
+          />
+        </aside>
+      )}
+
+      {manualScorePlayer === null || !canAdjustPlayerScore ? null : (
+        <ManualScoreDialog
+          key={manualScorePlayer.id}
+          onCancel={() => {
+            setManualScorePlayerId(null);
           }}
-          value={selectedBaseUrl}
-        >
-          {session.applicationUrls.map((url) => (
-            <option key={url} value={url}>
-              {url}
-            </option>
-          ))}
-        </select>
-        {qrCode === null ? null : (
+          onConfirm={(name, delta) => {
+            updatePlayer(manualScorePlayer.id, name, delta);
+          }}
+          player={manualScorePlayer}
+        />
+      )}
+
+      {!canSkipCurrentPhase ? null : (
+        <p className="fixed right-4 bottom-3 z-40 rounded-lg bg-slate-950/85 px-3 py-1 text-xs font-semibold text-white shadow-lg">
+          {game?.phase === "theme-explanation"
+            ? "Space — закрыть пояснение"
+            : "Space — пропустить таймер"}
+        </p>
+      )}
+      <BottomProgress timer={activeTimer} />
+    </main>
+  );
+}
+
+function formatConnectionTime(timestamp: number): string {
+  return new Intl.DateTimeFormat("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+function Lobby({
+  applicationUrls,
+  joinUrl,
+  onChangeBaseUrl,
+  onSelectPlayer,
+  onStart,
+  players,
+  qrCode,
+  selectedBaseUrl,
+}: {
+  applicationUrls: string[];
+  joinUrl: string | null;
+  onChangeBaseUrl: (url: string) => void;
+  onSelectPlayer: (playerId: string) => void;
+  onStart: () => void;
+  players: HostPlayer[];
+  qrCode: string | null;
+  selectedBaseUrl: string;
+}) {
+  return (
+    <section className="mx-auto flex w-full max-w-6xl flex-col items-center pb-6">
+      <div className="text-center">
+        <p className="text-sm font-semibold text-blue-300">Лобби</p>
+        <h2 className="mt-1 text-3xl font-bold">Подключение игроков</h2>
+        <p className="mt-2 text-slate-300">
+          После начала викторины подключение новых игроков закроется.
+        </p>
+      </div>
+
+      <div className="mt-6 grid w-full max-w-4xl items-center gap-6 rounded-3xl border border-slate-700 bg-slate-800 p-6 md:grid-cols-[auto_1fr]">
+        {qrCode === null ? (
+          <div className="grid size-[220px] place-items-center rounded-2xl bg-slate-700 text-sm text-slate-300">
+            Формируем QR-код…
+          </div>
+        ) : (
           <Image
             alt="QR-код для подключения к комнате"
-            className="mx-auto mt-3"
+            className="mx-auto rounded-2xl bg-white p-2"
             height={220}
             priority
             src={qrCode}
@@ -606,89 +919,109 @@ export function HostScreen({ roomCode }: HostScreenProps) {
             width={220}
           />
         )}
-        {joinUrl === null ? null : (
-          <a
-            className="mt-2 block text-center text-xs break-all text-blue-700 underline"
-            href={joinUrl}
+        <div className="min-w-0">
+          <label className="block">
+            <span className="mb-2 block text-sm font-semibold text-slate-300">
+              Адрес для подключения
+            </span>
+            <select
+              aria-label="Адрес локальной сети"
+              className="min-h-11 w-full rounded-xl border border-slate-600 bg-slate-900 px-3 text-white"
+              onChange={(event) => {
+                onChangeBaseUrl(event.target.value);
+              }}
+              value={selectedBaseUrl}
+            >
+              {applicationUrls.map((url) => (
+                <option key={url} value={url}>
+                  {url}
+                </option>
+              ))}
+            </select>
+          </label>
+          {joinUrl === null ? null : (
+            <a
+              className="mt-3 block text-sm break-all text-blue-300 underline"
+              href={joinUrl}
+            >
+              {joinUrl}
+            </a>
+          )}
+          <Button
+            className="mt-5 w-full rounded-xl"
+            disabled={players.length === 0}
+            onClick={onStart}
           >
-            {joinUrl}
-          </a>
-        )}
-        <NetworkDiagnostics
-          applicationUrls={session.applicationUrls}
-          connected={connected}
-          joinUrl={joinUrl}
-          roomState={roomState}
-          selectedBaseUrl={selectedBaseUrl}
-        />
-        <div className="mt-4">
-          <PlayerList players={roomState?.players ?? []} />
+            Начать викторину
+          </Button>
         </div>
-      </aside>
+      </div>
 
-      <BottomProgress timer={game?.timer ?? roomState?.buzzer.timer ?? null} />
-    </main>
-  );
-}
-
-function NetworkDiagnostics({
-  applicationUrls,
-  connected,
-  joinUrl,
-  roomState,
-  selectedBaseUrl,
-}: {
-  applicationUrls: string[];
-  connected: boolean;
-  joinUrl: string | null;
-  roomState: HostRoomState | null;
-  selectedBaseUrl: string;
-}) {
-  const selectedUrl = selectedBaseUrl === "" ? null : new URL(selectedBaseUrl);
-  const localAddresses = applicationUrls
-    .map((url) => new URL(url).hostname)
-    .filter((hostname) => hostname !== "localhost" && hostname !== "127.0.0.1");
-
-  return (
-    <section className="mt-5 rounded-xl border border-slate-300 bg-slate-50 p-3">
-      <h3 className="font-semibold">Диагностика сети</h3>
-      <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-        <dt className="text-slate-500">Socket.IO</dt>
-        <dd className={connected ? "text-emerald-700" : "text-red-700"}>
-          {connected ? "подключён" : "нет соединения"}
-        </dd>
-        <dt className="text-slate-500">Клиентов</dt>
-        <dd>{roomState?.connectedClientCount ?? 0}</dd>
-        <dt className="text-slate-500">Display</dt>
-        <dd>{roomState?.connectedDisplayCount ?? 0}</dd>
-        <dt className="text-slate-500">Интерфейс</dt>
-        <dd className="break-all">{selectedUrl?.hostname ?? "не выбран"}</dd>
-        <dt className="text-slate-500">Порт</dt>
-        <dd>{selectedUrl?.port || "80"}</dd>
-        <dt className="text-slate-500">Локальные IPv4</dt>
-        <dd className="break-all">
-          {localAddresses.length === 0
-            ? "не найдены"
-            : localAddresses.join(", ")}
-        </dd>
-        <dt className="text-slate-500">Адрес игрока</dt>
-        <dd className="break-all">{joinUrl ?? "формируется"}</dd>
-      </dl>
-      <ul className="mt-3 list-disc space-y-1 pl-4 text-xs text-slate-600">
-        <li>Все устройства должны находиться в одной Wi-Fi или LAN-сети.</li>
-        <li>На телефонах отключите мобильный интернет и VPN.</li>
-        <li>Проверьте client isolation и изоляцию гостей на роутере.</li>
-        <li>Разрешите входящие подключения в firewall компьютера ведущего.</li>
-      </ul>
+      <div className="mt-8 w-full">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xl font-bold">Подключились</h3>
+          <span className="rounded-full bg-slate-800 px-3 py-1 text-sm text-slate-300">
+            {players.length}
+          </span>
+        </div>
+        {players.length === 0 ? (
+          <p className="mt-4 rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
+            Ожидаем игроков…
+          </p>
+        ) : (
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {players.map((player) => (
+              <button
+                aria-label={`Изменить баллы игрока ${player.name}`}
+                className="relative rounded-2xl border border-slate-700 bg-slate-800 p-4 text-left hover:border-blue-400 hover:bg-slate-700"
+                data-testid="lobby-player-card"
+                key={player.id}
+                onClick={() => {
+                  onSelectPlayer(player.id);
+                }}
+                type="button"
+              >
+                <h4 className="pr-6 text-lg font-bold">{player.name}</h4>
+                <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                  <dt className="text-slate-400">Подключён</dt>
+                  <dd>{formatConnectionTime(player.joinedAt)}</dd>
+                  <dt className="text-slate-400">Устройство</dt>
+                  <dd className="truncate" title={player.device}>
+                    {player.device}
+                  </dd>
+                  <dt className="text-slate-400">Ping</dt>
+                  <dd>
+                    {player.connected
+                      ? player.pingMs === null
+                        ? "измеряется…"
+                        : `${player.pingMs} мс`
+                      : "—"}
+                  </dd>
+                </dl>
+                <span
+                  aria-label={player.connected ? "Онлайн" : "Оффлайн"}
+                  className={[
+                    "absolute top-4 right-4 size-3 rounded-full",
+                    player.connected ? "bg-emerald-400" : "bg-red-500",
+                  ].join(" ")}
+                  role="status"
+                />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
 
 function HostBoard({
   board,
+  onExplain,
   onSelect,
 }: {
   board: GameBoardTheme[];
+  onExplain: (themeId: string) => void;
   onSelect: (questionId: string) => void;
 }) {
   const maxQuestionCount = Math.max(
@@ -705,9 +1038,25 @@ function HostBoard({
     >
       {board.map((theme) => (
         <div className="contents" key={theme.id}>
-          <h3 className="grid min-h-16 place-items-center rounded-lg bg-slate-800 p-3 text-center font-semibold">
-            {theme.title}
-          </h3>
+          <div className="relative grid min-h-16 place-items-center rounded-lg bg-slate-800 p-3 pr-11 text-center font-semibold">
+            <h3>{theme.title}</h3>
+            <button
+              aria-label={`Показать пояснение темы ${theme.title}`}
+              className="absolute top-2 right-2 grid size-7 place-items-center rounded-full border border-blue-300 bg-blue-600 text-sm font-black text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:border-slate-600 disabled:bg-slate-700 disabled:text-slate-500"
+              disabled={theme.description === null}
+              onClick={() => {
+                onExplain(theme.id);
+              }}
+              title={
+                theme.description === null
+                  ? "Пояснение для темы не заполнено"
+                  : "Показать пояснение темы"
+              }
+              type="button"
+            >
+              ?
+            </button>
+          </div>
           {Array.from({ length: maxQuestionCount }, (_, questionIndex) => {
             const question = theme.questions[questionIndex];
 
@@ -719,7 +1068,7 @@ function HostBoard({
               />
             ) : (
               <Button
-                aria-label={`${theme.title}, ${question.price}`}
+                aria-label={`${theme.title}, ${question.label ?? question.price}`}
                 className="min-h-16 text-xl"
                 data-testid="host-board-price"
                 disabled={question.played}
@@ -729,7 +1078,7 @@ function HostBoard({
                 }}
                 variant={question.played ? "secondary" : "primary"}
               >
-                {question.played ? "—" : question.price}
+                {question.played ? "—" : (question.label ?? question.price)}
               </Button>
             );
           })}
@@ -739,25 +1088,120 @@ function HostBoard({
   );
 }
 
-function PlayerList({ players }: { players: HostRoomState["players"] }) {
+function GamePlayerPanel({
+  canAdjustScore,
+  onSelectPlayer,
+  players,
+}: {
+  canAdjustScore: boolean;
+  onSelectPlayer: (playerId: string) => void;
+  players: HostPlayer[];
+}) {
   return (
-    <div>
-      <h3 className="font-semibold">Игроки ({players.length})</h3>
-      <ul className="mt-2 space-y-2">
+    <section>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xl font-bold">Игроки</h2>
+        <span className="rounded-full bg-slate-800 px-3 py-1 text-sm text-slate-300">
+          {players.length}
+        </span>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
         {players.length === 0 ? (
-          <li className="text-sm text-slate-500">Пока никого</li>
+          <p className="col-span-2 text-sm text-slate-400">Пока никого</p>
         ) : (
           players.map((player) => (
-            <li
-              className="flex justify-between gap-3 rounded-lg bg-slate-200 px-3 py-2 text-slate-950"
+            <button
+              aria-label={`Изменить баллы игрока ${player.name}`}
+              className="relative grid aspect-square place-content-center rounded-2xl border border-slate-700 bg-slate-800 p-3 text-center enabled:hover:border-blue-400 enabled:hover:bg-slate-700 disabled:cursor-default"
+              data-testid="game-player-card"
+              disabled={!canAdjustScore}
               key={player.id}
+              onClick={() => {
+                onSelectPlayer(player.id);
+              }}
+              type="button"
             >
-              <span>{player.name}</span>
-              <strong>{player.score}</strong>
-            </li>
+              <h3 className="line-clamp-2 font-bold">{player.name}</h3>
+              <p className="mt-1 text-sm text-slate-300">
+                {player.score} баллов
+              </p>
+              <span
+                aria-label={player.connected ? "Онлайн" : "Оффлайн"}
+                className={[
+                  "absolute right-3 bottom-3 size-4 rounded-full ring-2 ring-slate-900",
+                  player.connected ? "bg-emerald-400" : "bg-red-500",
+                ].join(" ")}
+                role="status"
+              />
+            </button>
           ))
         )}
-      </ul>
+      </div>
+    </section>
+  );
+}
+
+function QuestionPlayerGrid({
+  attemptedPlayerIds,
+  onSelect,
+  players,
+  selectable,
+}: {
+  attemptedPlayerIds: string[];
+  onSelect: (playerId: string) => void;
+  players: HostPlayer[];
+  selectable: boolean;
+}) {
+  return (
+    <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {players.map((player) => {
+        const hasAnsweredIncorrectly = attemptedPlayerIds.includes(player.id);
+        const canSelect =
+          selectable && player.buzzPosition !== null && !hasAnsweredIncorrectly;
+
+        return (
+          <button
+            aria-label={
+              hasAnsweredIncorrectly
+                ? `${player.name} уже ответил неверно`
+                : player.buzzPosition === null
+                  ? `${player.name} не нажал`
+                  : `Выбрать ${player.name} для ответа, нажатие ${player.buzzPosition}`
+            }
+            className={[
+              "relative min-h-24 rounded-2xl border-2 px-5 py-4 text-left transition",
+              hasAnsweredIncorrectly
+                ? "border-red-500 bg-red-950/70"
+                : "border-slate-700 bg-slate-800 hover:border-blue-400 hover:bg-slate-700 disabled:cursor-default disabled:hover:border-slate-700 disabled:hover:bg-slate-800",
+            ].join(" ")}
+            disabled={!canSelect}
+            key={player.id}
+            onClick={() => {
+              onSelect(player.id);
+            }}
+            type="button"
+          >
+            <span
+              className={[
+                "absolute top-3 right-3 grid size-9 place-items-center rounded-full border-2 text-sm font-black",
+                hasAnsweredIncorrectly
+                  ? "border-red-300 bg-red-600 text-white"
+                  : player.buzzPosition === null
+                    ? "border-slate-600 text-transparent"
+                    : "border-blue-300 bg-blue-600 text-white",
+              ].join(" ")}
+            >
+              {player.buzzPosition ?? ""}
+            </span>
+            <span className="block max-w-[calc(100%-3rem)] truncate text-lg font-bold">
+              {player.name}
+            </span>
+            <span className="mt-2 block text-sm text-slate-300">
+              {player.score} баллов
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -773,6 +1217,309 @@ function PhaseCard({ eyebrow, title }: { eyebrow: string; title: string }) {
   );
 }
 
+function GiveawaySetup({
+  onConfirm,
+  players,
+  text,
+}: {
+  onConfirm: (playerId: string, wager: number) => void;
+  players: HostPlayer[];
+  text: string;
+}) {
+  const [playerId, setPlayerId] = useState(players[0]?.id ?? "");
+  const [wager, setWager] = useState(100);
+
+  return (
+    <section className="mx-auto max-w-2xl rounded-2xl bg-slate-800 p-6">
+      <p className="text-sm font-semibold text-blue-300">Спецмодификатор</p>
+      <h2 className="mt-1 text-3xl font-black">{text}</h2>
+      <p className="mt-3 text-slate-300">
+        Выберите получателя вопроса и введите названную им ставку.
+      </p>
+      <label className="mt-5 block">
+        <span className="mb-1 block text-sm text-slate-300">Отвечающий</span>
+        <select
+          aria-label="Получатель вопроса"
+          className="min-h-11 w-full rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-slate-100"
+          onChange={(event) => setPlayerId(event.target.value)}
+          value={playerId}
+        >
+          {players.map((player) => (
+            <option key={player.id} value={player.id}>
+              {player.name} · {player.score}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="mt-3 block">
+        <span className="mb-1 block text-sm text-slate-300">Ставка</span>
+        <Input
+          aria-label="Ставка отданного вопроса"
+          max={1_000_000}
+          min={100}
+          onChange={(event) => setWager(Number(event.target.value))}
+          step={100}
+          type="number"
+          value={wager}
+        />
+      </label>
+      <Button
+        className="mt-5 w-full"
+        disabled={
+          playerId === "" ||
+          wager < 100 ||
+          wager > 1_000_000 ||
+          wager % 100 !== 0
+        }
+        onClick={() => onConfirm(playerId, wager)}
+      >
+        Открыть вопрос
+      </Button>
+    </section>
+  );
+}
+
+function ThemeExplanationCard({
+  description,
+  title,
+}: {
+  description: string;
+  title: string;
+}) {
+  return (
+    <section className="grid min-h-full place-items-center py-6 text-center">
+      <div className="max-w-4xl">
+        <p className="text-lg font-semibold text-blue-300">Пояснение темы</p>
+        <h2 className="mt-2 text-4xl font-black text-balance">{title}</h2>
+        <p className="mt-7 text-2xl leading-relaxed whitespace-pre-line text-slate-100">
+          {description}
+        </p>
+        <p className="mt-8 text-sm font-semibold text-slate-400">
+          Нажмите Space, когда все прочитают пояснение
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function AnswerDecisionDialog({
+  onJudge,
+  playerName,
+}: {
+  onJudge: (judgement: AnswerJudgement) => void;
+  playerName: string;
+}) {
+  const onJudgeRef = useRef(onJudge);
+
+  useEffect(() => {
+    onJudgeRef.current = onJudge;
+  }, [onJudge]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key === "v" || key === "м") {
+        event.preventDefault();
+        onJudgeRef.current("correct");
+      } else if (key === "x" || key === "ч") {
+        event.preventDefault();
+        onJudgeRef.current("incorrect");
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  return (
+    <Dialog
+      closable={false}
+      onClose={() => undefined}
+      open
+      title={`Отвечает ${playerName}`}
+    >
+      <p className="text-center text-sm text-slate-500">Оцените ответ игрока</p>
+      <div className="mt-5 grid grid-cols-2 gap-4">
+        <Button
+          aria-label="Верно, клавиша V"
+          className="min-h-36 flex-col gap-2 rounded-3xl bg-emerald-600 text-6xl hover:bg-emerald-500"
+          onClick={() => {
+            onJudge("correct");
+          }}
+        >
+          <span aria-hidden>✓</span>
+          <kbd className="text-xs font-semibold">V</kbd>
+        </Button>
+        <Button
+          aria-label="Неверно, клавиша X"
+          className="min-h-36 flex-col gap-2 rounded-3xl text-6xl"
+          onClick={() => {
+            onJudge("incorrect");
+          }}
+          variant="danger"
+        >
+          <span aria-hidden>✕</span>
+          <kbd className="text-xs font-semibold">X</kbd>
+        </Button>
+      </div>
+    </Dialog>
+  );
+}
+
+const maximumScoreDelta = 1_000_000;
+
+function clampScoreDelta(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(-maximumScoreDelta, Math.min(maximumScoreDelta, value));
+}
+
+function formatScoreDelta(value: number): string {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function ScoreEditorDialog({
+  cancelLabel,
+  children,
+  initialDelta,
+  inputLabel,
+  onCancel,
+  onConfirm,
+  title,
+}: {
+  cancelLabel: string;
+  children?: ReactNode;
+  initialDelta: number;
+  inputLabel: string;
+  onCancel: () => void;
+  onConfirm: (delta: number) => void;
+  title: (delta: number) => string;
+}) {
+  const [delta, setDelta] = useState(initialDelta);
+  const deltaRef = useRef(delta);
+  const onConfirmRef = useRef(onConfirm);
+
+  useEffect(() => {
+    deltaRef.current = delta;
+  }, [delta]);
+
+  useEffect(() => {
+    onConfirmRef.current = onConfirm;
+  }, [onConfirm]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (
+        event.target instanceof HTMLInputElement &&
+        event.target.type !== "number" &&
+        key !== "enter"
+      ) {
+        return;
+      }
+      if (key === "arrowup") {
+        event.preventDefault();
+        setDelta((current) => clampScoreDelta(current + 100));
+      } else if (key === "arrowdown") {
+        event.preventDefault();
+        setDelta((current) => clampScoreDelta(current - 100));
+      } else if (key === "s" || key === "ы") {
+        event.preventDefault();
+        setDelta((current) => clampScoreDelta(-current));
+      } else if (key === "0") {
+        event.preventDefault();
+        setDelta(0);
+      } else if (key === "x" || key === "ч") {
+        event.preventDefault();
+        setDelta((current) => clampScoreDelta(current * 2));
+      } else if (key === "enter") {
+        event.preventDefault();
+        onConfirmRef.current(deltaRef.current);
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  return (
+    <Dialog
+      closable={false}
+      onClose={() => undefined}
+      open
+      title={title(delta)}
+    >
+      {children}
+      <label className="mt-3 block max-w-xs">
+        <Input
+          aria-label={inputLabel}
+          onChange={(event) => {
+            setDelta(clampScoreDelta(event.target.valueAsNumber));
+          }}
+          step={100}
+          type="number"
+          value={delta}
+        />
+      </label>
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <Button
+          aria-label="Сменить знак, клавиша S"
+          onClick={() => {
+            setDelta((current) => clampScoreDelta(-current));
+          }}
+          variant="secondary"
+        >
+          +/− <kbd className="ml-2 text-xs">S</kbd>
+        </Button>
+        <Button
+          aria-label="Обнулить, клавиша 0"
+          onClick={() => {
+            setDelta(0);
+          }}
+          variant="secondary"
+        >
+          0 <kbd className="ml-2 text-xs">0</kbd>
+        </Button>
+        <Button
+          aria-label="Умножить на два, клавиша X"
+          onClick={() => {
+            setDelta((current) => clampScoreDelta(current * 2));
+          }}
+          variant="secondary"
+        >
+          ×2 <kbd className="ml-2 text-xs">X</kbd>
+        </Button>
+      </div>
+      <div className="mt-5 grid gap-2">
+        <Button
+          className="min-h-14 rounded-2xl text-xl"
+          onClick={() => {
+            onConfirm(delta);
+          }}
+        >
+          Ок <kbd className="ml-3 text-xs">Enter</kbd>
+        </Button>
+        <Button onClick={onCancel} variant="secondary">
+          {cancelLabel}
+        </Button>
+      </div>
+    </Dialog>
+  );
+}
+
 function ScoreConfirmation({
   onCancel,
   onConfirm,
@@ -782,45 +1529,76 @@ function ScoreConfirmation({
   onConfirm: (proposalId: string, delta: number) => void;
   proposal: ScoreChangeProposal;
 }) {
-  const [delta, setDelta] = useState(proposal.suggestedDelta);
+  const isAllPlayersProposal = proposal.target === "all-players";
 
   return (
-    <div className="mt-5 rounded-xl border border-blue-500 p-4">
-      <h3 className="text-xl font-semibold">
-        Подтверждение баллов: {proposal.playerName}
-      </h3>
-      <p className="mt-1 text-slate-300">
-        Стоимость {proposal.questionPrice}; результат:{" "}
-        {proposal.judgement === "correct"
-          ? "верно"
-          : proposal.judgement === "incorrect"
-            ? "неверно"
-            : "не успел"}
-      </p>
-      <label className="mt-3 block max-w-xs">
-        <span className="mb-1 block text-sm">Изменение баллов</span>
+    <ScoreEditorDialog
+      cancelLabel={isAllPlayersProposal ? "Отмена" : "Назад к оценке"}
+      initialDelta={proposal.suggestedDelta}
+      inputLabel={isAllPlayersProposal ? "Баллы каждому" : "Баллы"}
+      onCancel={onCancel}
+      onConfirm={(delta) => {
+        onConfirm(proposal.id, delta);
+      }}
+      title={(delta) =>
+        isAllPlayersProposal
+          ? `Все игроки · ${formatScoreDelta(delta)} каждому`
+          : `${proposal.playerName} · ${formatScoreDelta(delta)} баллов`
+      }
+    />
+  );
+}
+
+function ManualScoreDialog({
+  onCancel,
+  onConfirm,
+  player,
+}: {
+  onCancel: () => void;
+  onConfirm: (name: string, delta: number) => void;
+  player: HostPlayer;
+}) {
+  const [name, setName] = useState(player.name);
+  const [nameError, setNameError] = useState<string | null>(null);
+
+  return (
+    <ScoreEditorDialog
+      cancelLabel="Отмена"
+      initialDelta={0}
+      inputLabel="Баллы"
+      onCancel={onCancel}
+      onConfirm={(delta) => {
+        const parsedName = roomNameSchema.safeParse(name);
+        if (!parsedName.success) {
+          setNameError(
+            parsedName.error.issues[0]?.message ?? "Проверьте имя игрока",
+          );
+          return;
+        }
+        onConfirm(parsedName.data, delta);
+      }}
+      title={(delta) =>
+        `${name || "Игрок"} · ${formatScoreDelta(delta)} баллов`
+      }
+    >
+      <label className="block max-w-xs">
+        <span className="mb-1 block text-sm font-semibold text-slate-700">
+          Имя игрока
+        </span>
         <Input
-          aria-label="Изменение баллов"
+          aria-label="Имя игрока"
+          autoFocus
+          maxLength={PLAYER_NAME_MAX_LENGTH}
           onChange={(event) => {
-            setDelta(Number(event.target.value));
+            setName(event.target.value);
+            setNameError(null);
           }}
-          step={1}
-          type="number"
-          value={delta}
+          value={name}
         />
       </label>
-      <div className="mt-3 flex gap-2">
-        <Button
-          onClick={() => {
-            onConfirm(proposal.id, delta);
-          }}
-        >
-          Подтвердить
-        </Button>
-        <Button onClick={onCancel} variant="secondary">
-          Отмена
-        </Button>
-      </div>
-    </div>
+      {nameError === null ? null : (
+        <ErrorMessage className="mt-2">{nameError}</ErrorMessage>
+      )}
+    </ScoreEditorDialog>
   );
 }

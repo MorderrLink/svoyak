@@ -18,9 +18,10 @@ import {
   describeFileError,
   getFileErrorCode,
 } from "@/server/file-system/file-error";
+import { processMediaUpload } from "@/server/media/media-processor";
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { quizLimits } from "@/shared/constants/quiz";
-import type { QuizConfig, QuizImage } from "@/shared/types/quiz";
+import type { QuizConfig, QuizImage, QuizMedia } from "@/shared/types/quiz";
 
 const allowedImageMimeTypes = new Set([
   "image/gif",
@@ -48,6 +49,12 @@ export function getReferencedAssetPaths(quiz: QuizConfig): Set<string> {
         if (question.content.image !== undefined) {
           paths.add(question.content.image.path);
         }
+        if (question.answerImage !== undefined) {
+          paths.add(question.answerImage.path);
+        }
+        if (question.content.media !== undefined) {
+          paths.add(question.content.media.path);
+        }
       }
     }
   }
@@ -67,9 +74,14 @@ export function rewriteQuizAssetPaths(
   for (const round of copy.rounds) {
     for (const theme of round.themes) {
       for (const question of theme.questions) {
-        const image = question.content.image;
-        if (image?.path.startsWith(oldPrefix) === true) {
-          image.path = `${newPrefix}${image.path.slice(oldPrefix.length)}`;
+        for (const image of [question.content.image, question.answerImage]) {
+          if (image?.path.startsWith(oldPrefix) === true) {
+            image.path = `${newPrefix}${image.path.slice(oldPrefix.length)}`;
+          }
+        }
+        const media = question.content.media;
+        if (media?.path.startsWith(oldPrefix) === true) {
+          media.path = `${newPrefix}${media.path.slice(oldPrefix.length)}`;
         }
       }
     }
@@ -172,6 +184,46 @@ export class AssetStorage {
     };
   }
 
+  async uploadMedia(
+    slug: string,
+    source: Buffer,
+    target: "audio" | "video",
+  ): Promise<QuizMedia> {
+    const processed = await processMediaUpload(source, target);
+    const relativePath = `assets/${slug}/media/${randomUUID()}${processed.extension}`;
+    const destination = this.resolveAssetPath(relativePath);
+    try {
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, processed.source, { flag: "wx" });
+    } catch (error: unknown) {
+      throw new QuizRepositoryError(
+        "QUIZ_STORAGE_ERROR",
+        `Не удалось сохранить медиафайл: ${describeFileError(error)}`,
+      );
+    }
+
+    const common = {
+      durationMs: processed.durationMs,
+      path: relativePath,
+      trimEndMs: processed.durationMs,
+      trimStartMs: 0,
+    };
+    return processed.kind === "audio"
+      ? {
+          ...common,
+          kind: "audio",
+          mimeType: "audio/webm",
+          waveform:
+            processed.waveform ??
+            Array.from({ length: quizLimits.mediaWaveformSamples }, () => 0),
+        }
+      : {
+          ...common,
+          kind: "video",
+          mimeType: "video/mp4",
+        };
+  }
+
   async readAsset(assetPath: string): Promise<Buffer> {
     const path = this.resolveAssetPath(assetPath);
     try {
@@ -208,40 +260,55 @@ export class AssetStorage {
     }
   }
 
-  async cleanupUnused(quiz: QuizConfig): Promise<void> {
-    const imagesDirectory = this.getImagesDirectory(quiz.slug);
-    const referenced = getReferencedAssetPaths(quiz);
-    let entries: string[];
-
-    try {
-      entries = await readdir(imagesDirectory);
-    } catch (error: unknown) {
-      if (getFileErrorCode(error) === "ENOENT") {
-        return;
-      }
+  async deleteMedia(slug: string, assetPath: string): Promise<void> {
+    if (!assetPath.startsWith(`assets/${slug}/media/`)) {
       throw new QuizRepositoryError(
-        "QUIZ_STORAGE_ERROR",
-        `Не удалось проверить каталог изображений: ${describeFileError(error)}`,
+        "QUIZ_VALIDATION_ERROR",
+        "Медиафайл не принадлежит викторине",
       );
     }
-
     try {
-      await Promise.all(
-        entries.map(async (entry) => {
-          const assetPath = `assets/${quiz.slug}/images/${entry}`;
-          if (!referenced.has(assetPath)) {
-            await rm(this.resolveAssetPath(assetPath), {
-              force: true,
-              recursive: true,
-            });
-          }
-        }),
-      );
+      await rm(this.resolveAssetPath(assetPath), { force: true });
     } catch (error: unknown) {
       throw new QuizRepositoryError(
         "QUIZ_STORAGE_ERROR",
-        `Не удалось очистить изображения: ${describeFileError(error)}`,
+        `Не удалось удалить медиафайл: ${describeFileError(error)}`,
       );
+    }
+  }
+
+  async cleanupUnused(quiz: QuizConfig): Promise<void> {
+    const referenced = getReferencedAssetPaths(quiz);
+    for (const kind of ["images", "media"] as const) {
+      const directory = resolve(this.getQuizAssetsDirectory(quiz.slug), kind);
+      let entries: string[];
+      try {
+        entries = await readdir(directory);
+      } catch (error: unknown) {
+        if (getFileErrorCode(error) === "ENOENT") continue;
+        throw new QuizRepositoryError(
+          "QUIZ_STORAGE_ERROR",
+          `Не удалось проверить каталог ассетов: ${describeFileError(error)}`,
+        );
+      }
+      try {
+        await Promise.all(
+          entries.map(async (entry) => {
+            const assetPath = `assets/${quiz.slug}/${kind}/${entry}`;
+            if (!referenced.has(assetPath)) {
+              await rm(this.resolveAssetPath(assetPath), {
+                force: true,
+                recursive: true,
+              });
+            }
+          }),
+        );
+      } catch (error: unknown) {
+        throw new QuizRepositoryError(
+          "QUIZ_STORAGE_ERROR",
+          `Не удалось очистить ассеты: ${describeFileError(error)}`,
+        );
+      }
     }
   }
 

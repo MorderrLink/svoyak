@@ -1,12 +1,13 @@
 "use client";
 
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import QRCode from "qrcode";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { BottomProgress } from "@/components/bottom-progress";
-import { Button } from "@/components/button";
 import { ErrorMessage } from "@/components/error-message";
+import { QuestionMediaPlayer } from "@/components/question-media-player";
 import { getQuizAssetUrl } from "@/shared/api/quizzes";
 import type {
   DisplayGameState,
@@ -14,12 +15,14 @@ import type {
 } from "@/shared/contracts/socket";
 import { createClientSocket } from "@/shared/socket/client";
 import type { ApplicationClientSocket } from "@/shared/socket/client";
+import type { QuizImage } from "@/shared/types/quiz";
 
 export interface DisplayScreenProps {
   roomCode: string;
 }
 
 export function DisplayScreen({ roomCode }: DisplayScreenProps) {
+  const router = useRouter();
   const socketRef = useRef<ApplicationClientSocket | null>(null);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +38,10 @@ export function DisplayScreen({ roomCode }: DisplayScreenProps) {
       setError(null);
       socket.emit("room:attach-display", { roomCode }, (result) => {
         if (!result.ok) {
+          if (result.error.code === "ROOM_NOT_FOUND") {
+            router.replace("/");
+            return;
+          }
           setError(result.error.message);
         }
       });
@@ -44,6 +51,10 @@ export function DisplayScreen({ roomCode }: DisplayScreenProps) {
     });
     socket.on("display:state", setState);
     socket.on("error", (socketError) => {
+      if (socketError.code === "ROOM_NOT_FOUND") {
+        router.replace("/");
+        return;
+      }
       setError(socketError.message);
     });
     socket.connect();
@@ -53,7 +64,7 @@ export function DisplayScreen({ roomCode }: DisplayScreenProps) {
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [roomCode]);
+  }, [roomCode, router]);
 
   const joinUrl = useMemo(
     () =>
@@ -89,32 +100,17 @@ export function DisplayScreen({ roomCode }: DisplayScreenProps) {
   return (
     <main className="relative flex h-full flex-col overflow-hidden bg-slate-950 p-[clamp(1rem,2vw,2rem)] text-white">
       <header className="flex shrink-0 items-center justify-between gap-4">
-        <div>
-          <p className="text-[clamp(.75rem,1.2vw,1rem)] text-blue-300">
-            {state?.quizTitle ?? "Свояк"}
-          </p>
-          <p className="font-mono text-[clamp(1.25rem,2.5vw,2.25rem)] font-bold tracking-[0.16em]">
-            {roomCode}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span
-            className={
-              connected ? "text-sm text-emerald-300" : "text-sm text-red-300"
-            }
-          >
-            {connected ? "В сети" : "Нет соединения"}
-          </span>
-          <Button
-            className="min-h-9 px-3 text-sm"
-            onClick={() => {
-              void document.documentElement.requestFullscreen?.();
-            }}
-            variant="secondary"
-          >
-            На весь экран
-          </Button>
-        </div>
+        <h1 className="text-[clamp(1.25rem,2.5vw,2.25rem)] font-black text-blue-300">
+          {state?.quizTitle ?? "Свояк"}
+        </h1>
+        <span
+          aria-label={connected ? "Онлайн" : "Оффлайн"}
+          className={[
+            "size-4 shrink-0 rounded-full ring-2 ring-slate-900",
+            connected ? "bg-emerald-400" : "bg-red-500",
+          ].join(" ")}
+          role="status"
+        />
       </header>
 
       <div
@@ -144,9 +140,6 @@ function DisplayContent({
             <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
               Подключайтесь к игре
             </p>
-            <h1 className="mt-3 font-mono text-[clamp(3rem,10vw,8rem)] font-black tracking-[0.18em]">
-              {state?.roomCode}
-            </h1>
             <p className="mt-5 text-[clamp(1rem,2vw,1.75rem)] text-slate-300">
               Игроков подключено: {state?.connectedPlayerCount ?? 0}
             </p>
@@ -170,33 +163,81 @@ function DisplayContent({
   const game = state.game;
 
   if (game.phase === "board") {
-    return <DisplayBoard game={game} state={state} />;
+    return <DisplayBoard game={game} />;
+  }
+
+  if (
+    game.phase === "theme-explanation" &&
+    game.activeThemeExplanation !== null
+  ) {
+    return (
+      <section className="grid h-full min-h-0 place-items-center overflow-hidden py-[clamp(1rem,3vh,3rem)] text-center">
+        <div className="max-h-full max-w-[92vw] overflow-hidden">
+          <p className="text-[clamp(1rem,2vw,1.75rem)] font-semibold text-blue-300">
+            Пояснение темы
+          </p>
+          <h1 className="mt-2 text-[clamp(2rem,5vw,5rem)] leading-tight font-black text-balance">
+            {game.activeThemeExplanation.title}
+          </h1>
+          <p className="mt-[clamp(1rem,3vh,2.5rem)] text-[clamp(1.2rem,3vw,3rem)] leading-snug font-semibold text-balance [overflow-wrap:anywhere] whitespace-pre-line">
+            {game.activeThemeExplanation.description}
+          </p>
+        </div>
+      </section>
+    );
   }
 
   if (game.phase === "game-finished") {
     return (
-      <section className="grid h-full place-items-center">
-        <div className="w-full max-w-5xl">
-          <p className="text-center text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
+      <section className="grid h-full place-items-center text-center">
+        <div>
+          <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
             Игра завершена
           </p>
-          <h1 className="mt-2 text-center text-[clamp(2rem,5vw,4rem)] font-black">
-            Итоговая таблица
+          <h1 className="mt-2 text-[clamp(2.5rem,7vw,6rem)] font-black">
+            Спасибо за игру!
           </h1>
-          <ol className="mx-auto mt-6 max-w-3xl space-y-3">
-            {state.players.map((player, index) => (
-              <li
-                className="flex items-center justify-between rounded-xl bg-slate-800 px-6 py-3 text-[clamp(1.1rem,2.5vw,2rem)]"
-                key={`${player.name}-${index}`}
-              >
-                <span>
-                  {index + 1}. {player.name}
-                </span>
-                {player.score === null ? null : <strong>{player.score}</strong>}
-              </li>
-            ))}
-          </ol>
         </div>
+      </section>
+    );
+  }
+
+  if (game.phase === "wagering") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <div>
+          <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
+            Вопрос со ставкой
+          </p>
+          <h1 className="mt-3 text-[clamp(2.5rem,7vw,6rem)] font-black">
+            Игроки делают ставки
+          </h1>
+        </div>
+      </section>
+    );
+  }
+
+  if (game.phase === "giveaway-setup") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <div>
+          <p className="text-[clamp(1rem,2vw,1.5rem)] text-blue-300">
+            Спецмодификатор
+          </p>
+          <h1 className="mt-3 text-[clamp(3rem,9vw,8rem)] font-black">
+            Отдай вопрос
+          </h1>
+        </div>
+      </section>
+    );
+  }
+
+  if (game.phase === "modifier-buzzing") {
+    return (
+      <section className="grid h-full place-items-center text-center">
+        <h1 className="text-[clamp(3rem,10vw,9rem)] font-black text-blue-300">
+          Модификатор
+        </h1>
       </section>
     );
   }
@@ -219,71 +260,130 @@ function DisplayContent({
     );
   }
 
-  const hasText = question.text !== null && question.text !== "";
-  const hasImage = question.image !== null;
+  if (game.phase === "answer-reveal") {
+    return (
+      <section className="flex h-full min-h-0 py-[clamp(1rem,2vh,2rem)]">
+        <DisplayMediaContent
+          image={question.answerImage}
+          prominent
+          text={question.answer}
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="flex h-full min-h-0 flex-col py-[clamp(1rem,2vh,2rem)]">
       <p className="shrink-0 text-center text-[clamp(.9rem,1.5vw,1.25rem)] text-blue-300">
         {question.themeTitle} · {question.price}
       </p>
-      <div
-        className={[
-          "grid min-h-0 flex-1 items-center gap-[clamp(1rem,3vw,3rem)]",
-          hasText && hasImage
-            ? "md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]"
-            : "place-items-center",
-        ].join(" ")}
-      >
-        {hasText ? (
-          <h1 className="max-h-full overflow-hidden text-[clamp(1.75rem,4.5vw,5rem)] leading-tight font-bold text-balance">
-            {question.text}
-          </h1>
-        ) : null}
-        {question.image === null ? null : (
-          <Image
-            alt={question.image.alt ?? "Изображение вопроса"}
-            className="max-h-[62vh] w-full rounded-xl object-contain"
-            height={900}
-            priority
-            src={getQuizAssetUrl(question.image.path)}
-            unoptimized
-            width={1400}
+      {question.media === null ? (
+        <DisplayMediaContent image={question.image} text={question.text} />
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col gap-[clamp(.75rem,2vh,1.5rem)] py-2">
+          {question.text === null ? null : (
+            <h2 className="shrink-0 text-center text-[clamp(1.25rem,3vw,3.5rem)] leading-tight font-bold text-balance [overflow-wrap:anywhere] whitespace-pre-line">
+              {question.text}
+            </h2>
+          )}
+          <QuestionMediaPlayer
+            media={question.media}
+            playback={game.mediaPlayback}
           />
-        )}
-      </div>
+        </div>
+      )}
 
       {question.currentPlayerName === null ? null : (
         <p className="shrink-0 text-center text-[clamp(1.25rem,3vw,2.5rem)] font-semibold text-amber-300">
           Отвечает {question.currentPlayerName}
         </p>
       )}
-      {question.answer === null ? null : (
-        <div className="mt-3 shrink-0 rounded-xl bg-emerald-500/15 p-4 text-center">
-          <p className="text-sm text-emerald-300">Правильный ответ</p>
-          <p className="mt-1 text-[clamp(1.5rem,3.5vw,3rem)] font-bold">
-            {question.answer}
-          </p>
-        </div>
-      )}
     </section>
   );
 }
 
-function DisplayBoard({
-  game,
-  state,
+function DisplayMediaContent({
+  image,
+  prominent = false,
+  text,
 }: {
-  game: DisplayGameState;
-  state: DisplayRoomState;
+  image: QuizImage | null;
+  prominent?: boolean;
+  text: string | null;
 }) {
+  const hasText = text !== null && text !== "";
+  const hasImage = image !== null;
+  const textLength = text?.length ?? 0;
+  const explicitLineCount = text?.split(/\r\n|\r|\n/).length ?? 0;
+  const textSizeClass =
+    textLength > 500 || explicitLineCount > 8
+      ? "text-[clamp(1rem,2.1vw,2rem)] leading-[1.12]"
+      : textLength > 300 || explicitLineCount > 6
+        ? "text-[clamp(1.1rem,2.6vw,2.75rem)] leading-[1.15]"
+        : textLength > 180 || explicitLineCount > 4
+          ? "text-[clamp(1.25rem,3.2vw,3.5rem)] leading-[1.18]"
+          : hasImage && explicitLineCount > 2
+            ? "text-[clamp(1.25rem,3vw,3.25rem)] leading-[1.15]"
+            : prominent
+              ? "text-[clamp(2.5rem,7vw,7rem)] leading-tight"
+              : "text-[clamp(1.75rem,4.5vw,5rem)] leading-tight";
+
+  return (
+    <div
+      className={[
+        "h-full min-h-0 flex-1 gap-[clamp(.75rem,2vh,1.5rem)]",
+        hasText && hasImage
+          ? "flex flex-col"
+          : "grid h-full place-items-center",
+      ].join(" ")}
+      data-testid="display-media-content"
+    >
+      {hasText ? (
+        <h2
+          className={[
+            "max-h-full shrink-0 overflow-hidden font-bold text-balance [overflow-wrap:anywhere] whitespace-pre-line",
+            hasImage ? "max-h-[48%] text-center" : "max-w-full",
+            textSizeClass,
+          ].join(" ")}
+          data-testid="display-media-text"
+        >
+          {text}
+        </h2>
+      ) : null}
+      {image === null ? null : (
+        <div
+          className={[
+            "relative min-h-0 w-full overflow-hidden",
+            hasText ? "flex-1" : "h-full",
+          ].join(" ")}
+        >
+          <Image
+            alt={
+              image.alt ??
+              (prominent ? "Изображение ответа" : "Изображение вопроса")
+            }
+            className="rounded-xl object-contain"
+            data-testid="display-media-image"
+            fill
+            priority
+            sizes="100vw"
+            src={getQuizAssetUrl(image.path)}
+            unoptimized
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DisplayBoard({ game }: { game: DisplayGameState }) {
   const maxQuestionCount = Math.max(
     1,
     ...game.board.map((theme) => theme.questions.length),
   );
 
   return (
-    <section className="grid h-full min-h-0 gap-4 py-4 lg:grid-cols-[minmax(0,1fr)_minmax(12rem,20vw)]">
+    <section className="grid h-full min-h-0 py-4">
       <div
         className="grid min-h-0 gap-[clamp(.3rem,.8vw,.75rem)]"
         style={{
@@ -316,30 +416,13 @@ function DisplayBoard({
                   data-testid="display-board-price"
                   key={question.id}
                 >
-                  {question.played ? "—" : question.price}
+                  {question.played ? "—" : (question.label ?? question.price)}
                 </div>
               );
             })}
           </div>
         ))}
       </div>
-      <aside className="hidden min-h-0 rounded-xl bg-slate-900 p-4 lg:block">
-        <p className="text-sm text-slate-400">
-          Раунд {game.currentRoundIndex + 1} из {game.roundCount}
-        </p>
-        <h2 className="mt-1 text-xl font-semibold">Счёт</h2>
-        <ol className="mt-3 space-y-2">
-          {state.players.map((player, index) => (
-            <li
-              className="flex justify-between gap-2 rounded-lg bg-slate-800 px-3 py-2"
-              key={`${player.name}-${index}`}
-            >
-              <span className="truncate">{player.name}</span>
-              {player.score === null ? null : <strong>{player.score}</strong>}
-            </li>
-          ))}
-        </ol>
-      </aside>
     </section>
   );
 }

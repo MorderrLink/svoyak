@@ -1,13 +1,10 @@
 import next from "next";
 import { z } from "zod";
 
+import { initializeApplicationStorage } from "@/server/file-system/initialize-application-storage";
 import { createHttpServer } from "@/server/http/create-http-server";
 import { getApplicationUrls } from "@/server/network/local-addresses";
 import { RoomManager } from "@/server/room/room-manager";
-import {
-  RoomSnapshotPersistence,
-  RoomSnapshotStore,
-} from "@/server/session/room-snapshot-store";
 import { SessionEventJournal } from "@/server/session/session-event-journal";
 import { registerSocketHandlers } from "@/server/socket/register-socket-handlers";
 import { SocketSecurity } from "@/server/socket/socket-security";
@@ -47,6 +44,7 @@ async function closeSocketServer(io: SocketIOServer): Promise<void> {
 export async function startApplicationServer(): Promise<void> {
   const dev = process.env.NODE_ENV !== "production";
   const port = getPort();
+  const storage = await initializeApplicationStorage();
   const nextApp = next({
     dev,
     hostname: host,
@@ -61,32 +59,26 @@ export async function startApplicationServer(): Promise<void> {
   const roomManager = new RoomManager({
     journal: sessionJournal,
   });
-  const snapshotStore = new RoomSnapshotStore();
-  const snapshot = await snapshotStore.load();
-  if (snapshot !== null) {
-    const restored = roomManager.restoreSnapshot(snapshot);
-    roomManager.reconcileExpiredTimers();
-    if (restored.length > 0) {
-      console.log(`Восстановлены активные комнаты: ${restored.join(", ")}`);
-    }
-  }
-  const snapshotPersistence = new RoomSnapshotPersistence(
-    roomManager,
-    snapshotStore,
-  );
-  snapshotPersistence.start();
-  if (snapshot !== null) {
-    snapshotPersistence.schedule();
-  }
   const socketSecurity = new SocketSecurity(sessionJournal);
   const disposeSocketHandlers = registerSocketHandlers(io, roomManager, {
     applicationUrls: getApplicationUrls(port),
     security: socketSecurity,
   });
 
-  await listen(httpServer, port);
+  try {
+    await listen(httpServer, port);
+  } catch (error: unknown) {
+    disposeSocketHandlers();
+    await Promise.allSettled([
+      closeSocketServer(io),
+      sessionJournal.flush(),
+      nextApp.close(),
+    ]);
+    throw error;
+  }
 
   console.log(`Свояк запущен в режиме ${dev ? "development" : "production"}:`);
+  console.log(`  Данные викторин: ${storage.gamesDirectory}`);
   for (const url of getApplicationUrls(port)) {
     console.log(`  ${url}`);
   }
@@ -103,7 +95,6 @@ export async function startApplicationServer(): Promise<void> {
 
     try {
       disposeSocketHandlers();
-      await snapshotPersistence.stop();
       await closeSocketServer(io);
       await sessionJournal.flush();
       await nextApp.close();

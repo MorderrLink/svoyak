@@ -6,6 +6,7 @@ import type {
   QuizConfig,
   QuizQuestion,
   QuizRound,
+  QuizSpecialModifier,
   QuizTheme,
 } from "@/shared/types/quiz";
 import { createUuid } from "@/shared/utils/create-uuid";
@@ -49,6 +50,24 @@ export function createRound(order: number): QuizRound {
   };
 }
 
+export function createSpecialModifier(
+  kind: QuizSpecialModifier["kind"],
+): QuizSpecialModifier {
+  const base = {
+    id: createUuid(),
+    text:
+      kind === "giveaway"
+        ? "Отдай вопрос"
+        : kind === "money"
+          ? "Держи косарь!"
+          : kind === "invert-score"
+            ? "Плюс на минус"
+            : "Проси милостыню",
+  };
+
+  return kind === "money" ? { ...base, delta: 1_000, kind } : { ...base, kind };
+}
+
 export function createNewQuiz(): QuizConfig {
   const timestamp = new Date().toISOString();
   const title = "Новая викторина";
@@ -59,6 +78,7 @@ export function createNewQuiz(): QuizConfig {
     rounds: [createRound(0)],
     schemaVersion: QUIZ_SCHEMA_VERSION,
     settings: createDefaultQuizSettings(),
+    specialModifiers: [],
     slug: createQuizSlug(title),
     title,
     updatedAt: timestamp,

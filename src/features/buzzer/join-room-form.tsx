@@ -8,6 +8,7 @@ import { ErrorMessage } from "@/components/error-message";
 import { Input } from "@/components/input";
 import { LoadingState } from "@/components/loading-state";
 import { getPlayerTokenStorageKey } from "@/shared/constants/storage";
+import { PLAYER_NAME_MAX_LENGTH } from "@/shared/player/player-name";
 import { playerTokenSchema, roomNameSchema } from "@/shared/schemas/socket";
 import { createClientSocket } from "@/shared/socket/client";
 import type { ApplicationClientSocket } from "@/shared/socket/client";
@@ -41,6 +42,10 @@ export function JoinRoomForm({ roomCode }: JoinRoomFormProps) {
     socket.on("connect", () => {
       socket.emit("room:check", { roomCode }, (result) => {
         if (!result.ok) {
+          if (result.error.code === "ROOM_NOT_FOUND") {
+            router.replace("/");
+            return;
+          }
           setError(result.error.message);
           setAvailable(false);
           return;
@@ -48,7 +53,7 @@ export function JoinRoomForm({ roomCode }: JoinRoomFormProps) {
 
         setAvailable(result.data.exists);
         if (!result.data.exists) {
-          setError("Комната не найдена");
+          router.replace("/");
         }
       });
     });
@@ -90,6 +95,10 @@ export function JoinRoomForm({ roomCode }: JoinRoomFormProps) {
       (result) => {
         if (!result.ok) {
           setSubmitting(false);
+          if (result.error.code === "ROOM_NOT_FOUND") {
+            router.replace("/");
+            return;
+          }
           setError(result.error.message);
           return;
         }
@@ -126,7 +135,7 @@ export function JoinRoomForm({ roomCode }: JoinRoomFormProps) {
         autoFocus
         className="mt-6"
         disabled={!available || submitting}
-        maxLength={32}
+        maxLength={PLAYER_NAME_MAX_LENGTH}
         onChange={(event) => {
           setName(event.target.value);
           setError(null);

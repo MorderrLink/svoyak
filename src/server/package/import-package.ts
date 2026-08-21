@@ -16,6 +16,7 @@ import {
   rewriteQuizAssetPaths,
   validateImageSource,
 } from "@/server/media/asset-storage";
+import { validateMediaAsset } from "@/server/media/media-processor";
 import {
   createPackageIntegrity,
   verifyPackageIntegrity,
@@ -23,13 +24,13 @@ import {
 import type { QuizRepository } from "@/server/quiz/quiz-repository";
 import { QuizRepositoryError } from "@/server/quiz/quiz-repository-error";
 import { quizConfigSchema } from "@/shared/schemas/quiz";
-import type { QuizConfig } from "@/shared/types/quiz";
+import type { QuizConfig, QuizMedia } from "@/shared/types/quiz";
 
 const packageLimits = {
-  archiveBytes: 50 * 1_024 * 1_024,
+  archiveBytes: 500 * 1_024 * 1_024,
   configBytes: 5 * 1_024 * 1_024,
   fileCount: 200,
-  totalUncompressedBytes: 100 * 1_024 * 1_024,
+  totalUncompressedBytes: 1_000 * 1_024 * 1_024,
 } as const;
 
 export type ImportConflictStrategy = "copy" | "error" | "replace";
@@ -74,7 +75,7 @@ export async function validateQuizPackage(
   if (source.byteLength > packageLimits.archiveBytes) {
     throw new QuizRepositoryError(
       "QUIZ_VALIDATION_ERROR",
-      "ZIP-архив не должен быть больше 50 МБ",
+      "ZIP-архив не должен быть больше 500 МБ",
     );
   }
 
@@ -215,9 +216,24 @@ export async function validateQuizPackage(
   }
 
   const assets = new Map<string, Buffer>();
+  const mediaByPath = new Map<string, QuizMedia>();
+  for (const round of quiz.rounds) {
+    for (const theme of round.themes) {
+      for (const question of theme.questions) {
+        if (question.content.media !== undefined) {
+          mediaByPath.set(question.content.media.path, question.content.media);
+        }
+      }
+    }
+  }
   for (const entry of assetFiles) {
     const buffer = await entry.buffer();
-    await validateImageSource(buffer);
+    const media = mediaByPath.get(entry.path);
+    if (media === undefined) {
+      await validateImageSource(buffer);
+    } else {
+      await validateMediaAsset(buffer, media);
+    }
     assets.set(entry.path, buffer);
   }
 
@@ -226,7 +242,7 @@ export async function validateQuizPackage(
   if (JSON.stringify(referenced) !== JSON.stringify(packagedPaths)) {
     throw new QuizRepositoryError(
       "QUIZ_VALIDATION_ERROR",
-      "Набор изображений не соответствует ссылкам в конфиге",
+      "Набор ассетов не соответствует ссылкам в конфиге",
     );
   }
 

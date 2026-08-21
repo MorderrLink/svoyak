@@ -1,5 +1,7 @@
 export const QUIZ_SCHEMA_VERSION = 1 as const;
 
+export const DEFAULT_IMAGE_ALT_TEXT = "Не удалось загрузить изображение";
+
 export const quizLimits = {
   answerLength: 2_000,
   answerRevealSeconds: {
@@ -18,6 +20,9 @@ export const quizLimits = {
   imageAltLength: 500,
   imageFileSize: 10 * 1_024 * 1_024,
   imagePixels: 40_000_000,
+  mediaDurationMs: 30 * 60 * 1_000,
+  mediaFileSize: 200 * 1_024 * 1_024,
+  mediaWaveformSamples: 120,
   questionIntroSeconds: {
     max: 30,
     min: 0,
@@ -26,8 +31,15 @@ export const quizLimits = {
     max: 1_000_000,
     min: 1,
   },
+  specialModifierTextLength: 2_000,
+  wager: {
+    max: 1_000_000,
+    min: 100,
+    step: 100,
+  },
   questionTextLength: 5_000,
   slugLength: 100,
+  themeDescriptionLength: 5_000,
   themeTitleLength: 120,
   titleLength: 120,
 } as const;

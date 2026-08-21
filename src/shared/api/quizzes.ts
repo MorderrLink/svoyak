@@ -1,9 +1,15 @@
 import {
   quizConfigSchema,
   quizImageSchema,
+  quizMediaSchema,
   quizSummarySchema,
 } from "@/shared/schemas/quiz";
-import type { QuizConfig, QuizImage, QuizSummary } from "@/shared/types/quiz";
+import type {
+  QuizConfig,
+  QuizImage,
+  QuizMedia,
+  QuizSummary,
+} from "@/shared/types/quiz";
 
 export class QuizApiError extends Error {
   constructor(
@@ -160,6 +166,39 @@ export async function deleteQuizImage(
   if (!response.ok) {
     return throwApiError(response);
   }
+}
+
+export async function uploadQuizMedia(
+  quizId: string,
+  slug: string,
+  file: File,
+  kind: "audio" | "video",
+): Promise<QuizMedia> {
+  const formData = new FormData();
+  formData.set("file", file);
+  formData.set("kind", kind);
+  formData.set("slug", slug);
+  const response = await fetch(
+    `/api/quizzes/${encodeURIComponent(quizId)}/media`,
+    { body: formData, method: "POST" },
+  );
+  if (!response.ok) return throwApiError(response);
+  return quizMediaSchema.parse(await readResponseJson(response));
+}
+
+export async function deleteQuizMedia(
+  quizId: string,
+  path: string,
+): Promise<void> {
+  const response = await fetch(
+    `/api/quizzes/${encodeURIComponent(quizId)}/media`,
+    {
+      body: JSON.stringify({ path }),
+      headers: { "content-type": "application/json" },
+      method: "DELETE",
+    },
+  );
+  if (!response.ok) return throwApiError(response);
 }
 
 export function getQuizAssetUrl(path: string): string {

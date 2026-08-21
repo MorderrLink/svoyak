@@ -2,17 +2,21 @@
 
 import { create } from "zustand";
 
+import { DEFAULT_IMAGE_ALT_TEXT } from "@/shared/constants/quiz";
 import {
   createQuestion,
   createQuizSlug,
   createRound,
+  createSpecialModifier,
   createTheme,
 } from "@/shared/quiz/factory";
 import type {
   QuizConfig,
   QuizImage,
+  QuizMedia,
   QuizQuestion,
   QuizSettings,
+  QuizSpecialModifier,
 } from "@/shared/types/quiz";
 
 interface QuizEditorState {
@@ -24,6 +28,7 @@ interface QuizEditorState {
   slugManuallyEdited: boolean;
   addQuestion: (roundId: string, themeId: string) => void;
   addRound: () => void;
+  addSpecialModifier: (kind: QuizSpecialModifier["kind"]) => void;
   addTheme: (roundId: string) => void;
   initialize: (quiz: QuizConfig) => void;
   markSaved: (quiz: QuizConfig) => void;
@@ -35,6 +40,7 @@ interface QuizEditorState {
     questionId: string,
   ) => void;
   removeRound: (roundId: string) => void;
+  removeSpecialModifier: (modifierId: string) => void;
   removeTheme: (roundId: string, themeId: string) => void;
   setError: (error: string | null) => void;
   setSaving: (saving: boolean) => void;
@@ -50,7 +56,31 @@ interface QuizEditorState {
     questionId: string,
     image: QuizImage | undefined,
   ) => void;
+  setQuestionMedia: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    media: QuizMedia | undefined,
+  ) => void;
   setQuestionImageAlt: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    alt: string,
+  ) => void;
+  setQuestionWagerLimit: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    wagerLimit: number | undefined,
+  ) => void;
+  setAnswerImage: (
+    roundId: string,
+    themeId: string,
+    questionId: string,
+    image: QuizImage | undefined,
+  ) => void;
+  setAnswerImageAlt: (
     roundId: string,
     themeId: string,
     questionId: string,
@@ -67,6 +97,15 @@ interface QuizEditorState {
     >,
   ) => void;
   updateThemeTitle: (roundId: string, themeId: string, title: string) => void;
+  updateThemeDescription: (
+    roundId: string,
+    themeId: string,
+    description: string,
+  ) => void;
+  updateSpecialModifier: (
+    modifierId: string,
+    patch: { delta?: number; text?: string },
+  ) => void;
 }
 
 function normalizeOrders(quiz: QuizConfig): void {
@@ -119,6 +158,13 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
     set((state) =>
       updateDraft(state, (draft) => {
         draft.rounds.push(createRound(draft.rounds.length));
+      }),
+    );
+  },
+  addSpecialModifier: (kind) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        (draft.specialModifiers ??= []).push(createSpecialModifier(kind));
       }),
     );
   },
@@ -222,6 +268,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
       }),
     );
   },
+  removeSpecialModifier: (modifierId) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        draft.specialModifiers = (draft.specialModifiers ?? []).filter(
+          (modifier) => modifier.id !== modifierId,
+        );
+      }),
+    );
+  },
   removeTheme: (roundId, themeId) => {
     set((state) =>
       updateDraft(state, (draft) => {
@@ -261,10 +316,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
         for (const round of draft.rounds) {
           for (const theme of round.themes) {
             for (const question of theme.questions) {
-              const image = question.content.image;
               const prefix = `assets/${oldSlug}/`;
-              if (image?.path.startsWith(prefix) === true) {
-                image.path = `assets/${slug}/${image.path.slice(prefix.length)}`;
+              for (const image of [
+                question.content.image,
+                question.answerImage,
+                question.content.media,
+              ]) {
+                if (image?.path.startsWith(prefix) === true) {
+                  image.path = `assets/${slug}/${image.path.slice(prefix.length)}`;
+                }
               }
             }
           }
@@ -282,6 +342,21 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.questions.find((candidate) => candidate.id === questionId);
         if (question !== undefined) {
           question.content.image = image;
+          if (image !== undefined) question.content.media = undefined;
+        }
+      }),
+    );
+  },
+  setQuestionMedia: (roundId, themeId, questionId, media) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.content.media = media;
+          if (media !== undefined) question.content.image = undefined;
         }
       }),
     );
@@ -295,7 +370,48 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.questions.find((candidate) => candidate.id === questionId)
           ?.content.image;
         if (image !== undefined) {
-          image.alt = alt.trim() === "" ? undefined : alt;
+          image.alt = alt.trim() === "" ? DEFAULT_IMAGE_ALT_TEXT : alt;
+        }
+      }),
+    );
+  },
+  setQuestionWagerLimit: (roundId, themeId, questionId, wagerLimit) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.wagerLimit = wagerLimit;
+        }
+      }),
+    );
+  },
+  setAnswerImage: (roundId, themeId, questionId, image) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const question = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find((candidate) => candidate.id === questionId);
+        if (question !== undefined) {
+          question.answerImage = image;
+        }
+      }),
+    );
+  },
+  setAnswerImageAlt: (roundId, themeId, questionId, alt) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const image = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((theme) => theme.id === themeId)
+          ?.questions.find(
+            (candidate) => candidate.id === questionId,
+          )?.answerImage;
+        if (image !== undefined) {
+          image.alt = alt.trim() === "" ? DEFAULT_IMAGE_ALT_TEXT : alt;
         }
       }),
     );
@@ -311,10 +427,15 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           for (const round of draft.rounds) {
             for (const theme of round.themes) {
               for (const question of theme.questions) {
-                const image = question.content.image;
                 const prefix = `assets/${oldSlug}/`;
-                if (image?.path.startsWith(prefix) === true) {
-                  image.path = `assets/${newSlug}/${image.path.slice(prefix.length)}`;
+                for (const image of [
+                  question.content.image,
+                  question.answerImage,
+                  question.content.media,
+                ]) {
+                  if (image?.path.startsWith(prefix) === true) {
+                    image.path = `assets/${newSlug}/${image.path.slice(prefix.length)}`;
+                  }
                 }
               }
             }
@@ -360,6 +481,33 @@ export const useQuizEditorStore = create<QuizEditorState>((set) => ({
           ?.themes.find((candidate) => candidate.id === themeId);
         if (theme !== undefined) {
           theme.title = title;
+        }
+      }),
+    );
+  },
+  updateThemeDescription: (roundId, themeId, description) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const theme = draft.rounds
+          .find((round) => round.id === roundId)
+          ?.themes.find((candidate) => candidate.id === themeId);
+        if (theme !== undefined) {
+          theme.description =
+            description.trim() === "" ? undefined : description;
+        }
+      }),
+    );
+  },
+  updateSpecialModifier: (modifierId, patch) => {
+    set((state) =>
+      updateDraft(state, (draft) => {
+        const modifier = draft.specialModifiers?.find(
+          (candidate) => candidate.id === modifierId,
+        );
+        if (modifier === undefined) return;
+        if (patch.text !== undefined) modifier.text = patch.text;
+        if (modifier.kind === "money" && patch.delta !== undefined) {
+          modifier.delta = patch.delta;
         }
       }),
     );

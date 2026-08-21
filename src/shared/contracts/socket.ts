@@ -1,9 +1,8 @@
-import type { QuizImage } from "@/shared/types/quiz";
+import type { QuizImage, QuizMedia } from "@/shared/types/quiz";
 
 export type SocketErrorCode =
   | "BUZZER_CLOSED"
   | "BUZZ_ALREADY_PRESSED"
-  | "BUZZ_ALREADY_WON"
   | "BUZZ_WINDOW_EXPIRED"
   | "BUZZ_WINDOW_MISMATCH"
   | "HOST_UNAUTHORIZED"
@@ -40,11 +39,25 @@ export interface TimerState {
   startedAt: number;
 }
 
+export interface MediaPlaybackState {
+  playing: boolean;
+  positionMs: number;
+  revision: string;
+  startedAt: number | null;
+}
+
 export interface PublicPlayer {
   connected: boolean;
   id: string;
   name: string;
   score: number;
+}
+
+export interface HostPlayer extends PublicPlayer {
+  buzzPosition: number | null;
+  device: string;
+  joinedAt: number;
+  pingMs: number | null;
 }
 
 export type HostBuzzerStatus = "closed" | "open" | "winner";
@@ -63,21 +76,18 @@ export interface HostRoomState {
   connectedClientCount: number;
   connectedDisplayCount: number;
   game: HostGameState | null;
-  players: PublicPlayer[];
+  players: HostPlayer[];
   quizTitle: string | null;
   roomCode: string;
 }
 
-export interface DisplayPlayer {
-  name: string;
-  score: number | null;
-}
-
 export interface DisplayQuestion {
   answer: string | null;
+  answerImage: QuizImage | null;
   currentPlayerName: string | null;
   id: string;
   image: QuizImage | null;
+  media: QuizMedia | null;
   price: number;
   text: string | null;
   themeTitle: string;
@@ -85,8 +95,10 @@ export interface DisplayQuestion {
 
 export interface DisplayGameState {
   activeQuestion: DisplayQuestion | null;
+  activeThemeExplanation: ThemeExplanation | null;
   board: GameBoardTheme[];
   currentRoundIndex: number;
+  mediaPlayback: MediaPlaybackState | null;
   phase: GamePhase;
   roundCount: number;
   timer: TimerState | null;
@@ -95,26 +107,29 @@ export interface DisplayGameState {
 export interface DisplayRoomState {
   connectedPlayerCount: number;
   game: DisplayGameState | null;
-  players: DisplayPlayer[];
   quizTitle: string | null;
   roomCode: string;
 }
 
 export type PlayerBuzzerStatus =
   | "answered-incorrectly"
+  | "correct"
   | "other-player-answering"
+  | "queued"
   | "ready"
   | "time-expired"
   | "waiting"
   | "winner";
 
 export interface PlayerBuzzerState {
+  position: number | null;
   status: PlayerBuzzerStatus;
   timer: TimerState | null;
   windowId: string | null;
 }
 
 export interface PlayerScreenState {
+  answerDelta: number | null;
   buzzer: PlayerBuzzerState;
   connected: boolean;
   name: string;
@@ -123,6 +138,13 @@ export interface PlayerScreenState {
   roomCode: string;
   score: number;
   showScore: boolean;
+  wager: PlayerWagerState | null;
+}
+
+export interface PlayerWagerState {
+  maximum: number;
+  submitted: boolean;
+  value: number;
 }
 
 export interface PublicRoomState {
@@ -177,6 +199,14 @@ export interface ReconnectPlayerResult {
   roomCode: string;
 }
 
+export interface PlayerPingResult {
+  respondedAt: number;
+}
+
+export interface UpdatePlayerTelemetryPayload {
+  pingMs: number;
+}
+
 export interface HostCommandPayload {
   hostToken: string;
   roomCode: string;
@@ -211,61 +241,130 @@ export type GamePhase =
   | "board"
   | "buzzing"
   | "game-finished"
+  | "giveaway-setup"
   | "lobby"
+  | "modifier-buzzing"
   | "question-intro"
   | "round-finished"
-  | "score-confirmation";
+  | "score-confirmation"
+  | "theme-explanation"
+  | "wagering";
 
 export interface GameBoardQuestion {
   id: string;
+  label: string | null;
   played: boolean;
   price: number;
 }
 
 export interface GameBoardTheme {
+  description: string | null;
   id: string;
   questions: GameBoardQuestion[];
   title: string;
 }
 
+export interface ThemeExplanation {
+  description: string;
+  id: string;
+  title: string;
+}
+
 export interface HostActiveQuestion {
   answer: string;
+  answerImage: QuizImage | null;
   attemptedPlayerIds: string[];
   currentPlayerId: string | null;
   hostComment: string | null;
   id: string;
   image: QuizImage | null;
+  media: QuizMedia | null;
   price: number;
+  specialModifier: ActiveSpecialModifier | null;
   text: string | null;
   themeTitle: string;
+  wagerLimit: number | null;
+}
+
+export type SpecialModifierKind =
+  "giveaway" | "invert-score" | "mercy" | "money";
+
+export interface ActiveSpecialModifier {
+  kind: SpecialModifierKind;
+  text: string;
+}
+
+export interface HostWagerState {
+  maximum: number;
+  submittedPlayerIds: string[];
+  totalPlayerCount: number;
 }
 
 export type AnswerJudgement = "correct" | "incorrect" | "timeout";
 
-export interface ScoreChangeProposal {
+interface BaseScoreChangeProposal {
   editedDelta: number;
   id: string;
-  judgement: AnswerJudgement;
-  playerId: string;
-  playerName: string;
   questionId: string;
   questionPrice: number;
   suggestedDelta: number;
 }
 
+export interface PlayerScoreChangeProposal extends BaseScoreChangeProposal {
+  judgement: AnswerJudgement;
+  playerId: string;
+  playerName: string;
+  target: "player";
+}
+
+export interface AllPlayersScoreChangeProposal extends BaseScoreChangeProposal {
+  playerIds: string[];
+  playerNames: string[];
+  target: "all-players";
+}
+
+export type ScoreChangeProposal =
+  AllPlayersScoreChangeProposal | PlayerScoreChangeProposal;
+
 export interface HostGameState {
   activeQuestion: HostActiveQuestion | null;
+  activeThemeExplanation: ThemeExplanation | null;
   board: GameBoardTheme[];
   currentRoundIndex: number;
+  mediaPlayback: MediaPlaybackState | null;
   phase: GamePhase;
   quizTitle: string;
   roundCount: number;
   scoreProposal: ScoreChangeProposal | null;
   timer: TimerState | null;
+  wagers: HostWagerState | null;
 }
 
 export interface SelectQuestionPayload extends HostCommandPayload {
   questionId: string;
+}
+
+export interface SelectThemePayload extends HostCommandPayload {
+  themeId: string;
+}
+
+export interface SelectAnsweringPlayerPayload extends HostCommandPayload {
+  playerId: string;
+}
+
+export interface ConfigureGiveawayPayload extends HostCommandPayload {
+  playerId: string;
+  wager: number;
+}
+
+export interface SubmitWagerPayload {
+  playerToken: string;
+  roomCode: string;
+  wager: number;
+}
+
+export interface ChangeRoundPayload extends HostCommandPayload {
+  roundIndex: number;
 }
 
 export interface JudgeAnswerPayload extends HostCommandPayload {
@@ -275,6 +374,17 @@ export interface JudgeAnswerPayload extends HostCommandPayload {
 export interface ConfirmScorePayload extends HostCommandPayload {
   delta: number;
   proposalId: string;
+}
+
+export interface AdjustPlayerScorePayload extends HostCommandPayload {
+  delta: number;
+  playerId: string;
+}
+
+export interface UpdatePlayerPayload extends HostCommandPayload {
+  delta: number;
+  name: string;
+  playerId: string;
 }
 
 export interface ClientToServerEvents {
@@ -306,12 +416,36 @@ export interface ClientToServerEvents {
     payload: JudgeAnswerPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
+  "answer:select": (
+    payload: SelectAnsweringPlayerPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
   "question:finish": (
     payload: HostCommandPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
   "question:select": (
     payload: SelectQuestionPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "giveaway:configure": (
+    payload: ConfigureGiveawayPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "media:restart": (
+    payload: HostCommandPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "media:stop": (
+    payload: HostCommandPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "theme:explain": (
+    payload: SelectThemePayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "round:change": (
+    payload: ChangeRoundPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
   "score:cancel": (
@@ -322,6 +456,14 @@ export interface ClientToServerEvents {
     payload: ConfirmScorePayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
+  "score:adjust": (
+    payload: AdjustPlayerScorePayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "player:update": (
+    payload: UpdatePlayerPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
   "session:finish": (
     payload: HostCommandPayload,
     callback: (result: SocketResult<CommandResult>) => void,
@@ -330,9 +472,25 @@ export interface ClientToServerEvents {
     payload: HostCommandPayload,
     callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
+  "timer:skip": (
+    payload: HostCommandPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
+  "wager:submit": (
+    payload: SubmitWagerPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
+  ) => void;
   "player:reconnect": (
     payload: ReconnectPlayerPayload,
     callback: (result: SocketResult<ReconnectPlayerResult>) => void,
+  ) => void;
+  "player:ping": (
+    payload: Record<never, never>,
+    callback: (result: SocketResult<PlayerPingResult>) => void,
+  ) => void;
+  "player:telemetry": (
+    payload: UpdatePlayerTelemetryPayload,
+    callback: (result: SocketResult<CommandResult>) => void,
   ) => void;
   "room:check": (
     payload: CheckRoomPayload,
